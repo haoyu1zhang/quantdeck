@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>quantdeck</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 12l4-4 3 3 7-8' fill='none' stroke='%234fb3a5' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">quantdeck</div>
+    <nav>
+      <button class="tab active" data-tab="backtest">Backtest</button>
+      <button class="tab" data-tab="runs">Runs</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="backtest" class="view active">
+      <form id="bt-form" class="panel side">
+        <h2>Setup</h2>
+        <div class="row3">
+          <label>Market
+            <select name="market">
+              <option value="crypto">Crypto</option>
+              <option value="stock">US stocks</option>
+            </select>
+          </label>
+          <label>Data
+            <select name="source">
+              <option value="ccxt">CCXT</option>
+              <option value="alpaca">Alpaca</option>
+            </select>
+          </label>
+          <label>Timeframe
+            <select name="timeframe">
+              <option>15m</option><option>1h</option><option>4h</option>
+              <option selected>1d</option>
+            </select>
+          </label>
+        </div>
+        <label class="ex-field">Exchange
+          <input name="exchange" value="binance">
+        </label>
+        <label>Symbols <small>comma separated</small>
+          <input name="symbols" value="BTC/USDT, ETH/USDT">
+        </label>
+        <div class="row2">
+          <label>From <input name="start" type="date" value="2021-01-01"></label>
+          <label>To <input name="end" type="date"></label>
+        </div>
+        <div class="row3">
+          <label>Cash <input name="cash" type="number" value="10000" min="1"></label>
+          <label>Fee % <input name="fee" type="number" value="0.1" step="0.01" min="0"></label>
+          <label>Slip % <input name="slippage" type="number" value="0.05" step="0.01" min="0"></label>
+        </div>
+        <label>Strategy
+          <select name="strategy" id="strategy"></select>
+        </label>
+        <p id="strategy-doc" class="muted"></p>
+        <div id="params" class="params"></div>
+        <button type="submit" id="bt-run">Run backtest</button>
+        <p id="bt-status" class="status"></p>
+      </form>
+
+      <div class="results">
+        <div id="metrics" class="tiles"></div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Equity</h2>
+            <div class="legend"><span class="sw a"></span>strategy <span class="sw b"></span>buy &amp; hold</div>
+          </div>
+          <div id="equity-chart" class="chart"></div>
+        </div>
+        <div class="panel">
+          <h2>Drawdown</h2>
+          <div id="dd-chart" class="chart short"></div>
+        </div>
+        <div class="panel">
+          <h2>Trades <span id="trade-count" class="muted"></span></h2>
+          <div class="table-wrap"><table id="trades"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="runs" class="view">
+      <div class="panel side">
+        <h2>Paper &amp; live runs</h2>
+        <ul id="run-list" class="run-list"></ul>
+        <p class="muted small">Start one with <code>quantdeck run config.yaml</code>.</p>
+      </div>
+      <div class="results" id="run-detail">
+        <p class="muted">Pick a run on the left.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
