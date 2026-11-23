@@ -1,0 +1,28 @@
+# Binance spot testnet. Keys come from testnet.binance.vision and go in
+# BINANCE_API_KEY / BINANCE_SECRET. Signals use real Binance prices; orders go
+# to the testnet.
+name: btc-testnet
+mode: paper
+market: crypto
+symbols: [BTC/USDT, ETH/USDT]
+poll_seconds: 20
+
+broker:
+  type: ccxt
+  exchange: binance
+  sandbox: true
+
+data:
+  source: ccxt
+  exchange: binance
+  timeframe: 15m
+  warmup: 300
+
+strategy:
+  name: donchian
+  params: {entry: 40, exit: 20, risk: 0.01}
+
+risk:
+  max_order_value: 2000
+  max_position_pct: 0.5
+  max_daily_loss_pct: 0.05

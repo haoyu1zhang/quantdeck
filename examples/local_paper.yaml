@@ -1,0 +1,25 @@
+# Paper trading without any account: live prices from the exchange, fills
+# simulated locally. State is kept in runs/local-paper/sim_state.json.
+name: local-paper
+mode: paper
+market: crypto
+symbols: [BTC/USDT, SOL/USDT]
+cash: 5000
+poll_seconds: 30
+
+broker:
+  type: sim
+
+data:
+  source: ccxt
+  exchange: okx
+  timeframe: 5m
+  warmup: 200
+
+fees:
+  rate: 0.001
+  slippage: 0.0005
+
+strategy:
+  name: rsi_reversion
+  params: {period: 14, entry: 25, exit: 50, trend: 0}

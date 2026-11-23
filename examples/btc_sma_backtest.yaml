@@ -1,0 +1,20 @@
+name: btc-sma
+mode: backtest
+market: crypto
+symbols: [BTC/USDT, ETH/USDT]
+cash: 10000
+
+data:
+  source: ccxt
+  exchange: binance
+  timeframe: 1d
+  start: "2020-01-01"
+  end: "2025-01-01"
+
+fees:
+  rate: 0.001       # 0.1% taker
+  slippage: 0.0005
+
+strategy:
+  name: sma_cross
+  params: {fast: 20, slow: 100}

@@ -1,0 +1,26 @@
+# Real money. `quantdeck run` refuses to start this without --confirm-live.
+# Use the keys of your live Alpaca account, not the paper ones.
+name: stocks-live
+mode: live
+market: stock
+symbols: [SPY]
+poll_seconds: 60
+
+broker:
+  type: alpaca
+
+data:
+  source: alpaca
+  timeframe: 1h
+  warmup: 300
+
+strategy:
+  name: sma_cross
+  params: {fast: 10, slow: 40, allocation: 0.3}
+
+risk:
+  max_order_value: 1000
+  max_position_pct: 0.3
+  max_gross_exposure: 0.3
+  max_daily_loss_pct: 0.02
+  max_orders_per_day: 6

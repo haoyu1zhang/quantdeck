@@ -1,0 +1,18 @@
+name: stocks-rsi
+mode: backtest
+market: stock
+symbols: [SPY, QQQ, AAPL, MSFT]
+cash: 25000
+fractional: true
+
+data:
+  source: alpaca
+  timeframe: 1d
+  start: "2019-01-01"
+
+fees:
+  slippage: 0.0005
+
+strategy:
+  name: rsi_reversion
+  params: {period: 14, entry: 30, exit: 55, trend: 200}
