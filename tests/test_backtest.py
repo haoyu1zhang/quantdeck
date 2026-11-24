@@ -92,3 +92,11 @@ def test_strategy_param_validation():
         load_strategy("sma_cross", {"fast": 50, "slow": 20})
     s = load_strategy("examples.my_strategy:MomentumRank", {"top": 1})
     assert s.p.top == 1
+
+
+def test_vol_target_scales_position():
+    s = {"vol_target": 0.2}
+    calm = run_backtest(load_strategy("sma_cross", s), {"X": make_bars(500, seed=3, vol=0.005)})
+    wild = run_backtest(load_strategy("sma_cross", s), {"X": make_bars(500, seed=3, vol=0.05)})
+    held = lambda r: r.exposure[r.exposure > 0].mean()  # noqa: E731
+    assert held(wild) < held(calm)
