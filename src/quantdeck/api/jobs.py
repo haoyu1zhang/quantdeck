@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import threading
 import time
@@ -49,7 +50,8 @@ class JobManager:
         func=run_backtest_job,
     ) -> None:
         workers = max(1, min(4, (os.cpu_count() or 2) - 1))
-        self.executor = executor or ProcessPoolExecutor(max_workers=workers)
+        self.executor = executor or ProcessPoolExecutor(
+            max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
         self.max_pending = max_pending
         self.ttl = ttl
         self.func = func

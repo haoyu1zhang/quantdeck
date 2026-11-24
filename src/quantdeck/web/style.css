@@ -149,6 +149,18 @@ th:first-child, td:first-child { text-align: left; }
 .badge.live { color: var(--down); }
 .badge.paper { color: var(--accent); }
 
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 13, .85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.overlay[hidden] { display: none; }
+.overlay .panel { width: 340px; }
+
 @media (max-width: 900px) {
   .view.active { flex-direction: column; }
   .side { width: 100%; position: static; }

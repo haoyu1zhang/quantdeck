@@ -1,12 +1,36 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+function getToken() {
+  try { return localStorage.getItem("qd_token") || ""; } catch { return ""; }
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const headers = { "Content-Type": "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { ...opts, headers });
   const body = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    showLogin();
+    throw new Error("sign in required");
+  }
   if (!res.ok) throw new Error(body.detail || res.statusText);
   return body;
 }
+
+function showLogin() {
+  const box = $("#login");
+  if (!box.hidden) return;
+  box.hidden = false;
+  $("#login-token").focus();
+}
+
+$("#login-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  try { localStorage.setItem("qd_token", $("#login-token").value.trim()); } catch {}
+  location.reload();
+});
 
 const fmt = {
   pct: (v) => (v == null ? "–" : (v * 100).toFixed(2) + "%"),
@@ -225,9 +249,10 @@ async function loadRuns() {
 async function showRun() {
   if (!selectedRun) return;
   const el = $("#run-detail");
-  let s, eq;
+  let s, eq, st;
+  const base = `/api/runs/${encodeURIComponent(selectedRun)}`;
   try {
-    [s, eq] = await Promise.all([api(`/api/runs/${encodeURIComponent(selectedRun)}`), api(`/api/runs/${encodeURIComponent(selectedRun)}/equity`)]);
+    [s, eq, st] = await Promise.all([api(base), api(`${base}/equity`), api(`${base}/stats`)]);
   } catch (err) {
     el.innerHTML = `<p class="status err">${esc(err.message)}</p>`;
     return;
@@ -240,6 +265,10 @@ async function showRun() {
       ${tile("Cash", fmt.num(a.cash))}
       ${tile("State", esc(s.state) + (stale && s.state !== "stopped" ? " (stale)" : ""), s.halted ? "down" : "")}
       ${tile("Last beat", fmt.date(s.heartbeat).slice(11))}
+      ${tile("Realized", fmt.num(st.realized_pnl), st.realized_pnl > 0 ? "up" : st.realized_pnl < 0 ? "down" : "")}
+      ${tile("Trades", st.trades)}
+      ${tile("Win rate", st.trades ? fmt.pct(st.win_rate) : "–")}
+      ${tile("Fees", fmt.num(st.commissions))}
     </div>
     ${s.halted ? `<div class="panel down">Halted: ${esc(s.halt_reason)}</div>` : ""}
     <div class="panel"><h2>Equity</h2><div id="run-chart" class="chart short"></div></div>
@@ -249,10 +278,16 @@ async function showRun() {
         <td>${fmt.num(p.last_price, 4)}</td><td>${fmt.num(p.market_value)}</td>
         <td class="${p.unrealized_pnl >= 0 ? "up" : "down"}">${fmt.num(p.unrealized_pnl)}</td></tr>`).join("") || '<tr><td colspan="6" class="muted">flat</td></tr>'}
     </table></div>
+    <div class="panel"><h2>Closed trades</h2><div class="table-wrap"><table>
+      <tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>In</th><th>Out</th><th>PnL</th></tr>
+      ${(st.recent_trades || []).map((t) => `<tr><td>${esc(t.symbol)}</td><td>${fmt.date(t.entry_ts)}</td><td>${fmt.date(t.exit_ts)}</td>
+        <td>${fmt.qty(t.qty)}</td><td>${fmt.num(t.entry_price, 4)}</td><td>${fmt.num(t.exit_price, 4)}</td>
+        <td class="${t.pnl >= 0 ? "up" : "down"}">${fmt.num(t.pnl)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">none yet</td></tr>'}
+    </table></div></div>
     <div class="panel"><h2>Recent orders</h2><div class="table-wrap"><table>
       <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th>Note</th></tr>
       ${s.recent_orders.map((o) => `<tr><td>${fmt.date(o.created_at)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td>
-        <td>${fmt.qty(o.qty)}</td><td>${esc(o.type)}</td><td>${esc(o.status)}</td><td>${esc(o.reason)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">none</td></tr>'}
+        <td>${fmt.qty(o.qty)}</td><td>${esc(o.type)}${o.protective ? " (exit)" : ""}</td><td>${esc(o.status)}</td><td>${esc(o.reason)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">none</td></tr>'}
     </table></div></div>
     ${s.state !== "stopped" ? '<div><button class="btn danger" id="stop-run">Stop run</button></div>' : ""}`;
   lineChart($("#run-chart"), eq.ts, [{ name: "equity", values: eq.equity, color: "var(--accent)" }]);

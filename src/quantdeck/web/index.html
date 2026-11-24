@@ -96,6 +96,15 @@
     </section>
   </main>
 
+  <div id="login" class="overlay" hidden>
+    <form id="login-form" class="panel">
+      <h2>Access token</h2>
+      <p class="muted small">This dashboard is protected. Enter the value of QUANTDECK_TOKEN.</p>
+      <input id="login-token" type="password" autocomplete="current-password">
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

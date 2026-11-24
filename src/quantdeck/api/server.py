@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import hmac
 import json
 import re
+import threading
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..storage import TradeStore
 from ..strategies import REGISTRY
 from .jobs import JobManager, QueueFull
 
@@ -16,9 +21,42 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
-def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None) -> FastAPI:
+def clean_for_json_deep(x):
+    import math
+
+    if isinstance(x, dict):
+        return {k: clean_for_json_deep(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [clean_for_json_deep(v) for v in x]
+    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+        return None
+    return x
+
+
+class _FailureLimiter:
+    """Locks an IP out for a while after too many bad tokens."""
+
+    def __init__(self, max_failures: int = 10, window: float = 300) -> None:
+        self.max_failures, self.window = max_failures, window
+        self._fails: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def blocked(self, ip: str) -> bool:
+        with self._lock:
+            q = self._fails[ip]
+            while q and q[0] < time.monotonic() - self.window:
+                q.popleft()
+            return len(q) >= self.max_failures
+
+    def fail(self, ip: str) -> None:
+        with self._lock:
+            self._fails[ip].append(time.monotonic())
+
+
+def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, token: str | None = None) -> FastAPI:
     runs = Path(runs_dir)
     state = {"jobs": jobs}
+    limiter = _FailureLimiter()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -28,6 +66,20 @@ def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None) ->
         state["jobs"].shutdown()
 
     app = FastAPI(title="quantdeck", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def require_token(request: Request, call_next):
+        if not token or not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        ip = request.client.host if request.client else "?"
+        if limiter.blocked(ip):
+            return JSONResponse({"detail": "too many failed attempts, try later"}, status_code=429)
+        header = request.headers.get("authorization", "")
+        given = header[7:] if header.lower().startswith("bearer ") else ""
+        if not hmac.compare_digest(given.encode(), token.encode()):
+            limiter.fail(ip)
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
     def run_dir(name: str) -> Path:
         if not _NAME.match(name):
@@ -84,18 +136,30 @@ def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None) ->
     def get_run(name: str):
         return json.loads((run_dir(name) / "status.json").read_text(encoding="utf-8"))
 
+    def store(name: str):
+        db = run_dir(name) / "trades.db"
+        return TradeStore(db, readonly=True) if db.exists() else None
+
     @app.get("/api/runs/{name}/equity")
     def get_run_equity(name: str, limit: int = 2000):
-        f = run_dir(name) / "equity.csv"
-        if not f.exists():
+        st = store(name)
+        if st is None:
             return {"ts": [], "equity": []}
-        lines = f.read_text(encoding="utf-8").splitlines()[1:][-limit:]
-        ts, eq = [], []
-        for line in lines:
-            t, _, v = line.partition(",")
-            ts.append(t)
-            eq.append(float(v))
-        return {"ts": ts, "equity": eq}
+        try:
+            eq = st.equity(min(max(limit, 1), 20000))
+        finally:
+            st.close()
+        return {"ts": [t.isoformat() for t in eq.index], "equity": [round(float(v), 6) for v in eq.values]}
+
+    @app.get("/api/runs/{name}/stats")
+    def get_run_stats(name: str):
+        st = store(name)
+        if st is None:
+            return {"trades": 0, "realized_pnl": 0.0, "recent_trades": []}
+        try:
+            return clean_for_json_deep(st.stats())
+        finally:
+            st.close()
 
     @app.post("/api/runs/{name}/stop")
     def stop_run(name: str):
