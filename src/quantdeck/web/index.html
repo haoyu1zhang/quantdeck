@@ -98,14 +98,44 @@
 
     <section id="news" class="view">
       <div class="panel side">
+        <button type="button" class="btn" id="news-refresh">Refresh now</button>
+        <p id="news-refresh-status" class="status"></p>
         <h2>Verdicts <span id="news-updated" class="muted small"></span></h2>
         <ul id="verdict-list" class="run-list"></ul>
         <h2>Sources</h2>
         <table id="news-sources" class="compact"></table>
-        <p class="muted small">Collected by <code>quantdeck news watch news.yaml</code>.</p>
+        <p class="muted small">Refresh here, or keep <code>quantdeck news watch news.yaml</code> running.</p>
       </div>
-      <div class="results" id="news-detail">
-        <p class="muted">Pick a symbol on the left.</p>
+      <div class="results">
+        <details class="panel" id="news-add">
+          <summary>Add a post or headline</summary>
+          <form id="news-add-form">
+            <label>Text <small>paste the post or headline</small>
+              <textarea name="text" rows="3" required maxlength="4000"></textarea>
+            </label>
+            <div class="row3">
+              <label>Type
+                <select name="kind">
+                  <option value="social">X / social post</option>
+                  <option value="media">News article</option>
+                  <option value="newswire">Newswire</option>
+                  <option value="official">Official / regulator</option>
+                </select>
+              </label>
+              <label>Author <input name="author" placeholder="@handle or outlet"></label>
+              <label>Symbols <small>optional</small><input name="symbols" placeholder="NVDA, BTC"></label>
+            </div>
+            <div class="row2">
+              <label>Link <input name="url" type="url" placeholder="https://"></label>
+              <label class="check"><input type="checkbox" name="trusted"> Trusted author <small>(official account, large following)</small></label>
+            </div>
+            <button type="submit" id="news-add-btn">Add and score</button>
+            <p id="news-add-status" class="status"></p>
+          </form>
+        </details>
+        <div id="news-detail" class="stack">
+          <p class="muted">Pick a symbol on the left.</p>
+        </div>
       </div>
     </section>
   </main>

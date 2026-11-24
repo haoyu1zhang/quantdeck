@@ -111,6 +111,7 @@ def test_rules_direction():
     neutral = score_rules(_item("Apple to hold event next week"))
     assert neutral.direction == 0 and neutral.confidence <= 0.2
     assert score_rules(_item("Fed cuts rates by 25bp")).scope == "macro"
+    assert score_rules(_item("Tesla wins $5 billion robotaxi contract")).impact >= 0.45
     # negation flips and weakens
     assert score_rules(_item("CEO denies company was hacked")).direction > 0
 
@@ -300,7 +301,7 @@ def test_ingest_endpoint_feeds_pipeline(tmp_path):
         r = c.post("/api/news/ingest", json={"items": [
             {"title": "$NVDA wins $2 billion contract from Pentagon", "kind": "social", "credibility": 0.5,
              "engagement": {"likes": 900}}]})
-        assert r.status_code == 202 and r.json() == {"queued": 1}
+        assert r.status_code == 202 and r.json() == {"queued": 1, "processing": False}
 
         pipe = NewsPipeline(cfg)                               # real constructor adds the ingest inbox
         rep = pipe.run_once()
@@ -385,3 +386,72 @@ def test_parse_time_formats():
     assert parse_time("2026-11-20T21:05:00-05:00").hour == 2
     assert parse_time("Mon, 23 Nov 2026 14:30:00 GMT").hour == 14
     assert parse_time("garbage") is None
+
+
+def test_dashboard_refresh_and_manual_add(tmp_path):
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from quantdeck.api.server import create_app
+
+    conf = tmp_path / "news.yaml"
+    conf.write_text(yaml.safe_dump(cfg_dict(tmp_path)))
+    with TestClient(create_app(tmp_path / "runs")) as c:
+        assert c.get("/api/news/refresh").json() == {"enabled": False, "state": "idle"}
+        assert c.post("/api/news/refresh").status_code == 400
+        r = c.post("/api/news/ingest", json={"items": [{"title": "x"}], "process": True})
+        assert r.json()["processing"] is False
+
+    app = create_app(tmp_path / "runs", news_config=conf)
+    with TestClient(app) as c:
+        r = c.post("/api/news/refresh")
+        assert r.status_code == 202 and r.json()["enabled"] is True
+        for _ in range(200):
+            st = c.get("/api/news/refresh").json()
+            if st["state"] != "running":
+                break
+            import time
+            time.sleep(0.05)
+        assert st["state"] == "done" and st["scope"] == "all"
+
+        r = c.post("/api/news/ingest", json={"process": True, "items": [
+            {"title": "SEC sues exchange, Bitcoin tumbles", "kind": "official", "symbols": ["BTC/USDT"]}]})
+        assert r.json() == {"queued": 1, "processing": True}
+        for _ in range(200):
+            st = c.get("/api/news/refresh").json()
+            if st["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert st["state"] == "done" and st["scope"] == ["ingest"] and st["scored"] == 1
+        btc = {v["symbol"]: v for v in c.get("/api/news/verdicts").json()["verdicts"]}["BTC"]
+        assert btc["score"] < 0 and btc["drivers"][0]["source"] == "ingest"
+
+
+def test_refresher_queues_a_second_pass():
+    import threading
+
+    from quantdeck.news.refresher import Refresher
+
+    gate, runs = threading.Event(), []
+
+    class Store:
+        def close(self):
+            pass
+
+    class Pipe:
+        store = Store()
+
+        def run_once(self, force=False, only=None):
+            runs.append(only)
+            if len(runs) == 1:
+                gate.wait(5)
+            from quantdeck.news.pipeline import CycleReport
+            return CycleReport()
+
+    r = Refresher(None, pipeline_factory=Pipe)
+    r.start()
+    r.start(only=["ingest"])          # while the first is still running
+    r.start(only=["fed"])
+    gate.set()
+    st = r.wait(5)
+    assert runs == [None, ["fed", "ingest"]] and st["state"] == "done"

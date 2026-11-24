@@ -42,7 +42,7 @@ RULES: list[tuple[str, float, float]] = [
     (r"restat(?:e|ement)|accounting (?:irregularit|error)|non-reliance", -1, 0.8),
     (r"ceo (?:resigns?|steps? down|ousted|fired)|cfo (?:resigns?|steps? down)", -1, 0.5),
     (r"recalls?\b", -1, 0.4),
-    (r"(?:wins?|awarded|secures?) (?:a )?(?:\$[\d.]+ ?[mb]illion )?(?:contract|deal|order)", 1, 0.45),
+    (r"(?:wins?|awarded|secures?|lands?) [^.,;]{0,40}?(?:contract|deal|order)", 1, 0.45),
     (r"partnership with|strategic partnership", 1, 0.3),
     (r"fda (?:approv|clear)", 1, 0.75),
     (r"fda (?:reject|declin)|complete response letter|clinical hold", -1, 0.75),

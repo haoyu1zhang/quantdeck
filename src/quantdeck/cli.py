@@ -145,7 +145,9 @@ def cmd_serve(args) -> int:
     if token and len(token) < 16:
         print("QUANTDECK_TOKEN should be at least 16 characters")
         return 2
-    uvicorn.run(create_app(args.runs_dir, token=token, news_db=args.news_db), host=args.host, port=args.port, log_level="info")
+    app = create_app(args.runs_dir, token=token, news_db=args.news_db,
+                     news_config=args.news_config or os.environ.get("QUANTDECK_NEWS_CONFIG"))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 
@@ -334,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--runs-dir", default="runs")
     s.add_argument("--news-db", default="runs/news/news.db", help="news database for the News tab")
+    s.add_argument("--news-config", help="news config; enables the refresh button and manual adds in the News tab")
     s.set_defaults(func=cmd_serve)
 
     w = sub.add_parser("watchdog", help="alert when a paper/live run stops sending heartbeats")

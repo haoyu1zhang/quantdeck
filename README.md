@@ -157,8 +157,14 @@ a confidence.
 quantdeck news fetch examples/news.yaml            # one pass over every source, prints verdicts
 quantdeck news watch examples/news.yaml            # keep going; alerts on strong verdicts
 quantdeck news report examples/news.yaml --symbol NVDA --lang zh
-quantdeck serve                                    # News tab in the dashboard
+quantdeck serve --news-config examples/news.yaml   # News tab, with a refresh button and manual adds
 ```
+
+You don't have to keep `news watch` running. Start the dashboard with
+`--news-config` and use **Refresh now** in the News tab whenever you want a
+fresh pass, and **Add a post or headline** to paste in something you saw
+(an X post, a Telegram message, a headline from a paid terminal). Pasted
+items go through the same tagging and scoring as everything else.
 
 ![news view](docs/news.png)
 
@@ -416,7 +422,8 @@ docker compose up -d            # dashboard, one bot, watchdog
 ```
 
 For the news collector, copy `examples/news.yaml` to `configs/news.yaml` and
-start it with `docker compose --profile news up -d`. The dashboard's News tab
+start it with `docker compose --profile news up -d`. To refresh by hand from
+the dashboard instead, set `QUANTDECK_NEWS_CONFIG=configs/news.yaml` in `.env`. The dashboard's News tab
 and any bot with `news.db: runs/news/news.db` read from the same database.
 
 The dashboard is bound to 127.0.0.1 on the host. To reach it from elsewhere,

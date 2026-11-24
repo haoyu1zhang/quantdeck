@@ -78,6 +78,7 @@ sources:
   # daily_limit caps posts read per UTC day on either one.
   - name: x
     type: twitterapi_io                                  # needs TWITTERAPI_IO_KEY
+    enabled: false                                       # off for now; paste posts in the dashboard instead
     every: 15
     daily_limit: 5000
     min_followers: 5000

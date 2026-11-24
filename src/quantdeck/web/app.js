@@ -400,6 +400,84 @@ async function showNews(v) {
 
 setInterval(() => { if ($("#news").classList.contains("active")) loadNews(); }, 30000);
 
+async function waitForRefresh(statusEl) {
+  const t0 = Date.now();
+  for (;;) {
+    const st = await api("/api/news/refresh");
+    if (st.state !== "running") return st;
+    statusEl.textContent = `working… ${((Date.now() - t0) / 1000).toFixed(0)}s`;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+function refreshSummary(st) {
+  if (st.state === "failed") return st.error;
+  if (st.state !== "done") return "";
+  const errs = Object.keys(st.errors || {}).length;
+  return `${st.new_items} new, ${st.scored} scored in ${st.seconds}s` + (errs ? ` · ${errs} source${errs > 1 ? "s" : ""} failed` : "");
+}
+
+async function initNewsControls() {
+  const btn = $("#news-refresh"), status = $("#news-refresh-status");
+  const st = await api("/api/news/refresh").catch(() => ({ enabled: false }));
+  if (!st.enabled) {
+    btn.disabled = true;
+    status.textContent = "start the dashboard with --news-config to refresh from here";
+    $("#news-add-btn").disabled = true;
+    $("#news-add-status").textContent = "needs --news-config, like the refresh button";
+    return;
+  }
+  if (st.finished) status.textContent = `last: ${fmt.date(st.finished).slice(5)} · ${refreshSummary(st)}`;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    status.className = "status";
+    try {
+      await api("/api/news/refresh", { method: "POST" });
+      const done = await waitForRefresh(status);
+      status.className = done.state === "failed" ? "status err" : "status";
+      status.textContent = refreshSummary(done);
+      loadNews();
+    } catch (err) {
+      status.className = "status err";
+      status.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+$("#news-add-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, status = $("#news-add-status"), btn = $("#news-add-btn");
+  const text = f.text.value.trim();
+  if (!text) return;
+  const item = {
+    title: text.slice(0, 280), body: text.slice(280), kind: f.kind.value,
+    author: f.author.value.trim(), url: f.url.value.trim(), published_at: new Date().toISOString(),
+    symbols: f.symbols.value.split(",").map((s) => s.trim()).filter(Boolean),
+  };
+  if (f.trusted.checked) item.credibility = f.kind.value === "social" ? 0.7 : 0.95;
+  btn.disabled = true;
+  status.className = "status";
+  status.textContent = "scoring…";
+  try {
+    await api("/api/news/ingest", { method: "POST", body: JSON.stringify({ items: [item], process: true }) });
+    const done = await waitForRefresh(status);
+    if (done.state === "failed") throw new Error(done.error);
+    status.textContent = "added";
+    f.text.value = ""; f.url.value = "";
+    if (item.symbols.length) selectedNews = item.symbols[0].toUpperCase().split("/")[0];
+    loadNews();
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+initNewsControls();
+
 loadStrategies().catch((e) => ($("#bt-status").textContent = e.message));
 syncSourceFields();
 startRunPolling();

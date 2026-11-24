@@ -54,9 +54,17 @@ class _FailureLimiter:
 
 
 def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, token: str | None = None,
-               news_db: str | Path | None = None) -> FastAPI:
+               news_db: str | Path | None = None, news_config: str | Path | None = None) -> FastAPI:
     runs = Path(runs_dir)
     news_path = Path(news_db) if news_db else runs / "news" / "news.db"
+    refresher = None
+    if news_config:
+        from ..news import load_news_config
+        from ..news.refresher import Refresher
+
+        ncfg = load_news_config(news_config)
+        news_path = ncfg.db_path
+        refresher = Refresher(ncfg)
     state = {"jobs": jobs}
     limiter = _FailureLimiter()
 
@@ -214,6 +222,7 @@ def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, to
         rows = payload.get("items") if isinstance(payload.get("items"), list) else [payload]
         if not rows or len(rows) > 500:
             raise HTTPException(400, "send 1-500 items")
+        process = bool(payload.get("process")) and isinstance(payload.get("items"), list)
         clean = []
         for r in rows:
             if not isinstance(r, dict) or not str(r.get("title", "")).strip():
@@ -229,7 +238,23 @@ def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, to
         tmp = inbox / (name + ".tmp")
         tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in clean) + "\n", encoding="utf-8")
         tmp.replace(inbox / name)
-        return {"queued": len(clean)}
+        # process=true: score it now instead of waiting for the next `news watch` cycle
+        processing = bool(process and refresher)
+        if processing:
+            refresher.start(only=["ingest"])
+        return {"queued": len(clean), "processing": processing}
+
+    @app.get("/api/news/refresh")
+    def news_refresh_status():
+        if refresher is None:
+            return {"enabled": False, "state": "idle"}
+        return {"enabled": True, **refresher.status}
+
+    @app.post("/api/news/refresh", status_code=202)
+    def news_refresh():
+        if refresher is None:
+            raise HTTPException(400, "start the dashboard with --news-config news.yaml to refresh from here")
+        return {"enabled": True, **refresher.start()}
 
     if WEB_DIR.exists():
         app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")

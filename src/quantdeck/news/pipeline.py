@@ -134,10 +134,12 @@ class NewsPipeline:
         self.store.add_verdicts(verdicts)
         return verdicts
 
-    def run_once(self, force: bool = False) -> CycleReport:
+    def run_once(self, force: bool = False, only: list[str] | None = None) -> CycleReport:
+        """One pass. `only` limits it to the named sources (e.g. ["ingest"] after a manual add)."""
         t0 = time.monotonic()
         report = CycleReport()
-        raw = self.collect(self.due(force), report)
+        sources = [s for s in self.sources if s.name in only] if only is not None else self.due(force)
+        raw = self.collect(sources, report)
         items, relevant = self.prepare(raw)
         report.new_items = self.store.add_items(items, relevant)
         report.scored = self.score_pending()
