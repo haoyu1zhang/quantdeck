@@ -188,3 +188,38 @@ def test_ccxt_sync_reports_fills():
     assert [round(f.qty, 6) for f in f1 + f2] == [0.2, 0.3]
     assert f2[0].price == pytest.approx((0.5 * 101.2 - 0.2 * 100) / 0.3)
     assert b.sync() == []
+
+
+def test_protective_stop_placed_once_in_live_loop(tmp_path):
+    end = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)
+    df = make_bars(200, freq="h", end=end, vol=0.002, drift=0.001)
+    cfg = make_cfg(tmp_path, risk={"stop_loss_pct": 0.5})
+    broker = SimBroker(cfg.cash, cfg.fees)
+    LiveRunner(cfg, AlwaysBuy(), broker, GrowingSource(df, 100), clock=AlwaysOpen()).run(max_loops=30)
+    lines = [json.loads(x) for x in (tmp_path / "t" / "journal.jsonl").read_text().splitlines()]
+    stops = [x for x in lines if x["kind"] == "order" and x.get("protective")]
+    assert len(stops) == 1
+    assert len([o for o in broker.open_orders() if o.protective]) == 1  # left resting on shutdown
+
+
+def test_runner_sends_notifications(tmp_path):
+    from quantdeck.notify import Channel, Notifier
+
+    class Rec(Channel):
+        name = "rec"
+
+        def __init__(self):
+            self.titles = []
+
+        def send(self, title, text):
+            self.titles.append(title)
+
+    rec = Rec()
+    end = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)
+    df = make_bars(150, freq="h", end=end)
+    cfg = make_cfg(tmp_path)
+    LiveRunner(cfg, AlwaysBuy(), SimBroker(1000), GrowingSource(df, 100), clock=AlwaysOpen(),
+               notifier=Notifier([rec], prefix="[t] ")).run(max_loops=5)
+    assert rec.titles[0].startswith("[t] started")
+    assert any("buy BTC/USDT" in t for t in rec.titles)
+    assert rec.titles[-1] == "[t] stopped"

@@ -17,9 +17,11 @@ from ..config import Config
 from ..context import Context
 from ..data.sources import DataSource
 from ..models import Bar, Fill, Order, OrderStatus, utcnow
+from ..notify import Notifier, channels_from_env
+from ..storage import TradeStore
 from ..risk import RiskManager
 from ..strategies.base import Strategy
-from ..timeframes import parse_timeframe
+from ..timeframes import parse_timeframe, periods_per_year, trading_day
 from .clock import MarketClock, clock_for
 from .runlock import RunLock
 
@@ -64,6 +66,7 @@ class LiveRunner:
         broker: Broker,
         source: DataSource,
         clock: MarketClock | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         self.cfg = cfg
         self.strategy = strategy
@@ -75,12 +78,20 @@ class LiveRunner:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.lock = RunLock(self.dir / "run.lock")
         self.journal = Journal(self.dir / "journal.jsonl")
+        self.store = TradeStore(self.dir / "trades.db")
         self.risk = RiskManager(cfg.risk)
         self.ctx = Context(broker, self.risk, cfg.symbols, fractional=cfg.fractional, on_order=self._on_order)
+        self.ctx.periods_per_year = periods_per_year(self.tf, cfg.market)
         self._last_ts: dict[str, pd.Timestamp] = {}
         self._recent: deque = deque(maxlen=50)
         self._errors = 0
         self._stop = threading.Event()
+        n = cfg.notify
+        self.notifier = notifier or Notifier(
+            channels_from_env(n.telegram, n.webhook, n.email), n.events,
+            prefix=f"[{cfg.name}{' LIVE' if cfg.mode == 'live' else ''}] ", cooldown=n.cooldown,
+        )
+        self._halt_sent = False
         self._pool = ThreadPoolExecutor(max_workers=min(MAX_FETCH_WORKERS, max(len(cfg.symbols), 1)))
         self.started_at = utcnow()
 
@@ -113,11 +124,10 @@ class LiveRunner:
     def _start(self) -> None:
         log.info("starting %s in %s mode (%s, broker=%s)", self.cfg.name, self.cfg.mode,
                  self.cfg.market, self.broker.name)
-        if isinstance(self.broker, SimBroker):
-            state_file = self.dir / "sim_state.json"
-            if state_file.exists():
-                self.broker.load_state(json.loads(state_file.read_text()))
-                log.info("restored local paper account from %s", state_file)
+        state_file = self._state_file()
+        if state_file.exists():
+            self.broker.load_state(json.loads(state_file.read_text()))
+            log.info("restored broker state from %s", state_file)
 
         # warm up indicators with history, without trading
         self.ctx.trading = False
@@ -133,8 +143,9 @@ class LiveRunner:
         # reconcile with whatever the venue says we hold
         self.broker.sync()
         self.ctx.refresh()
+        self.ctx.adopt_protection()
         acct = self.ctx.account
-        self.risk.new_day(utcnow().date(), acct.equity)
+        self.risk.new_day(trading_day(utcnow(), self.cfg.market), acct.equity)
         log.info("account equity %.2f cash %.2f", acct.equity, acct.cash)
         for p in self.ctx.positions().values():
             log.info("existing position %s %s @ %.4f", p.symbol, p.qty, p.avg_price)
@@ -142,6 +153,9 @@ class LiveRunner:
             log.info("existing open order %s %s %s %s", o.id, o.side.value, o.qty, o.symbol)
         self.strategy.on_start(self.ctx)
         self._write_status("running")
+        held = ", ".join(f"{p.symbol} {p.qty:g}" for p in self.ctx.positions().values()) or "flat"
+        self.notifier.notify("start", f"started ({self.cfg.mode}, {self.broker.name})",
+                             f"equity {acct.equity:,.2f}\npositions: {held}")
 
     def _shutdown(self) -> None:
         log.info("stopping %s", self.cfg.name)
@@ -149,13 +163,23 @@ class LiveRunner:
             self.strategy.on_stop(self.ctx)
         except Exception:
             log.exception("on_stop failed")
-        if self.cfg.mode != "backtest":
+        # cancel working entries, but leave protective stops resting: they're
+        # there precisely for the time we aren't running
+        for o in self.ctx.open_orders():
             try:
-                self.broker.cancel_all()
+                if o.id:
+                    self.broker.cancel(o.id)
             except Exception as e:
-                log.warning("cancel on shutdown failed: %s", e)
+                log.warning("cancel of %s on shutdown failed: %s", o.id, e)
         self._save_sim()
         self._write_status("stopped")
+        try:
+            eq = self.ctx.account.equity
+        except Exception:
+            eq = float("nan")
+        self.notifier.notify("stop", "stopped", f"equity {eq:,.2f}")
+        self.notifier.flush(5)
+        self.store.close()
         self._pool.shutdown(wait=False, cancel_futures=True)
         self.broker.close()
 
@@ -179,10 +203,12 @@ class LiveRunner:
                 new_bars.extend(self._closed_bars(sym, df))
             new_bars.sort(key=lambda b: (b.ts, b.symbol))
 
-            for bar in new_bars:
-                self._on_bar(bar)
+            for ts in sorted({b.ts for b in new_bars}):
+                self._on_bars([b for b in new_bars if b.ts == ts])
 
             self._handle_fills(self.broker.sync())
+            self.ctx.refresh()
+            self.ctx.sync_protection()
             self._save_sim()
             self._errors = 0
             self._write_status("halted" if self.risk.halted else "running")
@@ -190,22 +216,32 @@ class LiveRunner:
             self._errors += 1
             log.exception("loop error (%d in a row)", self._errors)
             self._write_status(f"error: {e}")
+            self.notifier.notify("error", "loop error", f"{type(e).__name__}: {e}", key=f"error:{type(e).__name__}")
             if self._errors >= 10:
                 self.risk.halt("too many consecutive errors")
             # back off a bit more each time, up to five minutes
             self._stop.wait(min(300, 5 * self._errors))
+        if self.risk.halted != self._halt_sent:
+            self._halt_sent = self.risk.halted
+            if self.risk.halted:
+                self.notifier.notify("halt", "trading halted", self.risk.halt_reason)
 
-    def _on_bar(self, bar: Bar) -> None:
+    def _on_bars(self, bars: list[Bar]) -> None:
+        ts = bars[0].ts
         if isinstance(self.broker, SimBroker):
-            self.broker.process_bar(bar)
+            self.broker.process_bars(bars)
             self._handle_fills(self.broker.sync())
-        self.ctx.now = bar.ts
-        self.ctx.push_bar(bar)
+        self.ctx.now = ts
+        for bar in bars:
+            self.ctx.push_bar(bar)
         self.ctx.refresh()
-        self.risk.new_day(bar.ts.date(), self.ctx.equity)
+        self.risk.new_day(trading_day(ts, self.cfg.market), self.ctx.equity)
         self.risk.update_equity(self.ctx.equity)
-        self.strategy.on_bar(self.ctx, bar)
-        self._append_equity(bar.ts)
+        for bar in bars:
+            self.strategy.on_bar(self.ctx, bar)
+        self.ctx.refresh()
+        self.ctx.sync_protection()
+        self._append_equity(ts)
 
     def _handle_fills(self, fills: list[Fill]) -> None:
         if not fills:
@@ -213,9 +249,15 @@ class LiveRunner:
         self.ctx.refresh()
         for f in fills:
             log.info("fill %s %s %s @ %.6f", f.side.value, f.qty, f.symbol, f.price)
+            if self.ctx.is_protective(f.order_id):
+                self.notifier.notify("stop_hit", f"protective exit filled: {f.symbol}",
+                                     f"sold {f.qty:g} @ {f.price:,.4f}")
+            else:
+                self.notifier.notify("fill", f"{f.side.value} {f.symbol}", f"{f.qty:g} @ {f.price:,.4f}")
             if not isinstance(self.broker, SimBroker):
                 self._mark_filled(f)  # SimBroker updates the order objects itself
             self.journal.write("fill", f.to_dict())
+            self.store.record_fill(f)
             self.strategy.on_fill(self.ctx, f)
 
     def _mark_filled(self, f: Fill) -> None:
@@ -230,6 +272,7 @@ class LiveRunner:
     def _on_order(self, order: Order) -> None:
         self._recent.appendleft(order)
         self.journal.write("order", order.to_dict())
+        self.store.record_order(order)
 
     # --- data ---------------------------------------------------------------
 
@@ -266,17 +309,17 @@ class LiveRunner:
 
     # --- persistence --------------------------------------------------------
 
+    def _state_file(self) -> Path:
+        name = "sim_state.json" if isinstance(self.broker, SimBroker) else "broker_state.json"
+        return self.dir / name
+
     def _save_sim(self) -> None:
-        if isinstance(self.broker, SimBroker):
-            _write_json(self.dir / "sim_state.json", self.broker.to_state())
+        state = self.broker.to_state()
+        if state:
+            _write_json(self._state_file(), state)
 
     def _append_equity(self, ts) -> None:
-        path = self.dir / "equity.csv"
-        new = not path.exists()
-        with open(path, "a", encoding="utf-8") as f:
-            if new:
-                f.write("ts,equity\n")
-            f.write(f"{pd.Timestamp(ts).isoformat()},{self.ctx.equity:.6f}\n")
+        self.store.record_equity(ts, self.ctx.equity)
 
     def _write_status(self, state: str) -> None:
         try:
