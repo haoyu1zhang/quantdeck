@@ -13,6 +13,7 @@
     <nav>
       <button class="tab active" data-tab="backtest">Backtest</button>
       <button class="tab" data-tab="runs">Runs</button>
+      <button class="tab" data-tab="news">News</button>
     </nav>
   </header>
 
@@ -92,6 +93,19 @@
       </div>
       <div class="results" id="run-detail">
         <p class="muted">Pick a run on the left.</p>
+      </div>
+    </section>
+
+    <section id="news" class="view">
+      <div class="panel side">
+        <h2>Verdicts <span id="news-updated" class="muted small"></span></h2>
+        <ul id="verdict-list" class="run-list"></ul>
+        <h2>Sources</h2>
+        <table id="news-sources" class="compact"></table>
+        <p class="muted small">Collected by <code>quantdeck news watch news.yaml</code>.</p>
+      </div>
+      <div class="results" id="news-detail">
+        <p class="muted">Pick a symbol on the left.</p>
       </div>
     </section>
   </main>

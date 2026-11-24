@@ -82,6 +82,11 @@ class LiveRunner:
         self.risk = RiskManager(cfg.risk)
         self.ctx = Context(broker, self.risk, cfg.symbols, fractional=cfg.fractional, on_order=self._on_order)
         self.ctx.periods_per_year = periods_per_year(self.tf, cfg.market)
+        if cfg.news.db:
+            from ..news.reader import NewsReader
+
+            self.ctx.news_reader = NewsReader(cfg.news.db, cfg.market, cfg.news.max_age_minutes)
+            self.ctx.news_gate = (cfg.news.block_longs_below, cfg.news.block_shorts_above)
         self._last_ts: dict[str, pd.Timestamp] = {}
         self._recent: deque = deque(maxlen=50)
         self._errors = 0
@@ -348,4 +353,10 @@ class LiveRunner:
             "recent_orders": [o.to_dict() for o in self._recent],
             "last_bars": {s: t.isoformat() for s, t in self._last_ts.items()},
         }
+        if self.ctx.news_reader is not None:
+            status["news"] = {}
+            for sym in self.cfg.symbols:
+                v = self.ctx.news(sym)
+                if v:
+                    status["news"][sym] = {k: v[k] for k in ("score", "label", "confidence", "ts")}
         _write_json(self.dir / "status.json", status)

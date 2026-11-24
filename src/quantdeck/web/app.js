@@ -46,6 +46,7 @@ document.querySelectorAll(".tab").forEach((btn) =>
     document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === btn.dataset.tab));
     if (btn.dataset.tab === "runs") loadRuns();
+    if (btn.dataset.tab === "news") loadNews();
   })
 );
 
@@ -306,6 +307,98 @@ function startRunPolling() {
     if ($("#runs").classList.contains("active")) { loadRuns(); showRun(); }
   }, 5000);
 }
+
+// ---- news -----------------------------------------------------------------
+
+const LABEL_TEXT = { strong_bearish: "strong bearish", bearish: "bearish", neutral: "neutral", bullish: "bullish", strong_bullish: "strong bullish" };
+let selectedNews = null;
+
+function symName(s) {
+  return s === "MARKET:stock" ? "US stocks" : s === "MARKET:crypto" ? "Crypto market" : s;
+}
+
+function scoreBar(score) {
+  const w = Math.min(Math.abs(score), 1) * 50;
+  const left = score >= 0 ? 50 : 50 - w;
+  return `<div class="sbar"><span class="${score >= 0 ? "pos" : "neg"}" style="left:${left}%;width:${w}%"></span></div>`;
+}
+
+async function loadNews() {
+  let body;
+  try { body = await api("/api/news/verdicts"); } catch (err) {
+    $("#verdict-list").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+    return;
+  }
+  if (!body.available) {
+    $("#verdict-list").innerHTML = '<li class="muted">no news database yet</li>';
+    return;
+  }
+  const vs = body.verdicts.slice().sort((a, b) =>
+    (b.symbol.startsWith("MARKET:") - a.symbol.startsWith("MARKET:")) || Math.abs(b.score) - Math.abs(a.score));
+  const newest = vs.reduce((m, v) => (v.ts > m ? v.ts : m), "");
+  $("#news-updated").textContent = newest ? `· ${fmt.date(newest).slice(11)}` : "";
+  if (!selectedNews && vs.length) selectedNews = vs[0].symbol;
+  $("#verdict-list").innerHTML = vs.map((v) => `<li data-sym="${esc(v.symbol)}" class="${v.symbol === selectedNews ? "sel" : ""}">
+      <div class="name">${esc(symName(v.symbol))}<span class="lbl ${esc(v.label)}">${LABEL_TEXT[v.label] || esc(v.label)}</span></div>
+      ${scoreBar(v.score)}
+      <div class="meta">${v.score >= 0 ? "+" : ""}${fmt.num(v.score)} · confidence ${fmt.pct(v.confidence).replace(/\.\d+%/, "%")} · ${v.items} item${v.items === 1 ? "" : "s"}</div>
+    </li>`).join("") || '<li class="muted">no verdicts yet</li>';
+  document.querySelectorAll("#verdict-list li[data-sym]").forEach((li) =>
+    li.addEventListener("click", () => { selectedNews = li.dataset.sym; loadNews(); })
+  );
+  $("#news-sources").innerHTML = "<tr><th>Source</th><th>Items</th><th>Last OK</th></tr>" + body.sources.map((s) =>
+    `<tr title="${esc(s.last_error || "")}"><td>${esc(s.source)}${s.last_error ? ' <span class="down">●</span>' : ""}</td>
+     <td>${s.fetched}</td><td>${s.last_ok ? fmt.date(s.last_ok).slice(5) : "–"}</td></tr>`).join("");
+  const v = vs.find((x) => x.symbol === selectedNews);
+  if (v) showNews(v);
+}
+
+async function showNews(v) {
+  const el = $("#news-detail");
+  const q = encodeURIComponent(v.symbol);
+  let items = [], hist = [];
+  try {
+    [items, hist] = await Promise.all([api(`/api/news/items?symbol=${q}&limit=80`), api(`/api/news/history?symbol=${q}`)]);
+  } catch (err) {
+    el.innerHTML = `<p class="status err">${esc(err.message)}</p>`;
+    return;
+  }
+  const cls = v.score > 0.05 ? "up" : v.score < -0.05 ? "down" : "";
+  const arrow = (d) => (d == null ? '<span class="muted">·</span>' : d > 0.05 ? '<span class="up">▲</span>' : d < -0.05 ? '<span class="down">▼</span>' : '<span class="muted">■</span>');
+  el.innerHTML = `
+    <div class="tiles">
+      ${tile("Symbol", esc(symName(v.symbol)))}
+      ${tile("Verdict", LABEL_TEXT[v.label] || esc(v.label), cls)}
+      ${tile("Score", (v.score >= 0 ? "+" : "") + fmt.num(v.score), cls)}
+      ${tile("Confidence", Math.round(v.confidence * 100) + "%")}
+      ${tile("Bullish wt", fmt.num(v.bullish_weight), "up")}
+      ${tile("Bearish wt", fmt.num(v.bearish_weight), "down")}
+      ${tile("Stories", v.items)}
+    </div>
+    <div class="panel"><h2>Score, last 72h</h2><div id="news-chart" class="chart short"></div></div>
+    <div class="panel"><h2>What's driving it</h2>
+      ${v.drivers.map((d) => `<div class="driver">
+        <div>${arrow(d.direction)} <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.title)}</a></div>
+        <div class="meta">${esc(d.source)} · ${fmt.date(d.published_at)} · weight ${fmt.num(d.weight, 3)} · contribution ${d.contribution >= 0 ? "+" : ""}${fmt.num(d.contribution, 3)}</div>
+        ${d.reason ? `<div class="meta">${esc(d.reason)}</div>` : ""}
+      </div>`).join("") || '<p class="muted">nothing yet</p>'}
+    </div>
+    <div class="panel"><h2>Feed <span class="muted">(${items.length})</span></h2><div class="table-wrap tall"><table class="feed">
+      <tr><th></th><th>Time</th><th>Source</th><th>Headline</th><th>Impact</th><th>Conf</th></tr>
+      ${items.map((it) => `<tr title="${esc(it.reason || "")}"><td>${arrow(it.direction)}</td><td>${fmt.date(it.published_at).slice(5)}</td>
+        <td>${esc(it.source)}</td><td class="hl"><a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.title)}</a>
+        ${it.scope && it.scope !== "symbol" ? `<span class="badge">${esc(it.scope)}</span>` : ""}</td>
+        <td>${it.impact == null ? "–" : fmt.num(it.impact * 5, 1)}</td><td>${it.confidence == null ? "–" : fmt.pct(it.confidence).replace(/\.\d+%/, "%")}</td></tr>`).join("")}
+    </table></div></div>`;
+  if (hist.length < 2) {
+    $("#news-chart").innerHTML = '<p class="muted">the history fills in as <code>news watch</code> keeps running</p>';
+  } else {
+    lineChart($("#news-chart"), hist.map((h) => h.ts), [{ name: "score", values: hist.map((h) => h.score), color: "var(--accent)" }],
+      { yfmt: (x) => fmt.num(x) });
+  }
+}
+
+setInterval(() => { if ($("#news").classList.contains("active")) loadNews(); }, 30000);
 
 loadStrategies().catch((e) => ($("#bt-status").textContent = e.message));
 syncSourceFields();

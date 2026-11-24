@@ -149,6 +149,27 @@ th:first-child, td:first-child { text-align: left; }
 .badge.live { color: var(--down); }
 .badge.paper { color: var(--accent); }
 
+.lbl { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); border: 1px solid var(--line); }
+.lbl.bullish { color: var(--up); border-color: var(--up); }
+.lbl.strong_bullish { color: #0b1210; background: var(--up); border-color: var(--up); }
+.lbl.bearish { color: var(--down); border-color: var(--down); }
+.lbl.strong_bearish { color: #fff; background: var(--down); border-color: var(--down); }
+.sbar { position: relative; height: 4px; background: var(--line); border-radius: 2px; margin: 6px 0 4px; }
+.sbar::after { content: ""; position: absolute; left: 50%; top: -2px; width: 1px; height: 8px; background: var(--muted); }
+.sbar span { position: absolute; top: 0; height: 100%; border-radius: 2px; }
+.sbar .pos { background: var(--up); }
+.sbar .neg { background: var(--down); }
+table.compact td, table.compact th { padding: 4px 6px; }
+.driver { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.driver:last-child { border-bottom: 0; }
+.driver .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+a { color: var(--text); text-decoration: none; }
+a:hover { color: var(--accent); }
+.table-wrap.tall { max-height: 560px; }
+table.feed td.hl { text-align: left; white-space: normal; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
+table.feed .badge { color: var(--muted); }
+table.feed th:nth-child(4) { text-align: left; }
+
 .overlay {
   position: fixed;
   inset: 0;

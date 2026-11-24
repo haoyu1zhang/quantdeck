@@ -1,0 +1,86 @@
+# quantdeck news watch examples/news.yaml
+#
+# Sources without credentials work out of the box. The ones that need keys
+# (alpaca, sec, cryptopanic, reddit OAuth, x) report an error in
+# `news fetch` until the key is set, and the rest carry on.
+
+db: runs/news/news.db
+interval: 60              # seconds between cycles; each source has its own `every` (minutes)
+
+# watchlist: plain tickers, or a ticker with extra names to match in headlines
+stock:
+  - AAPL: [Apple, iPhone]
+  - NVDA: [Nvidia]
+  - TSLA: [Tesla, Elon Musk]
+  - MSFT: [Microsoft]
+  - SPY
+crypto:
+  - BTC                   # bitcoin, btc, $BTC are matched automatically
+  - ETH
+  - SOL
+
+llm:
+  provider: auto          # anthropic, openai (or any OpenAI-compatible endpoint), none = rules only
+  # model: claude-haiku-5-5
+  # base_url: https://api.deepseek.com/v1   # with NEWS_LLM_API_KEY, model: deepseek-chat
+  batch_size: 15
+  workers: 2
+
+weights:
+  half_life_hours: {intraday: 4, days: 24, weeks: 96}
+  max_age_hours: 72
+  macro_beta: 0.5
+  prior: 0.6
+  thresholds: {strong: 0.45, weak: 0.15}
+
+alerts:
+  labels: [strong_bearish, strong_bullish]
+  min_confidence: 0.35
+  cooldown: 3600
+  lang: en                # zh for Chinese alert text and reasons
+
+sources:
+  # --- official ---------------------------------------------------------------
+  - {name: fed, type: rss, kind: official, every: 10,
+     url: "https://www.federalreserve.gov/feeds/press_all.xml"}
+  - {name: sec-press, type: rss, kind: official, every: 15,
+     url: "https://www.sec.gov/news/pressreleases.rss"}
+  - {name: bls, type: rss, kind: official, every: 30,
+     url: "https://www.bls.gov/feed/bls_latest.rss"}
+
+  # --- wires and financial press ------------------------------------------------
+  - {name: alpaca-benzinga, type: alpaca, every: 2}      # needs ALPACA_API_KEY / ALPACA_SECRET_KEY
+  - {name: cnbc, type: rss, every: 5, credibility: 0.75,
+     url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"}
+  - {name: marketwatch, type: rss, every: 5, credibility: 0.75,
+     url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"}
+  - {name: yahoo, type: rss, every: 10, market: stock, credibility: 0.65,
+     url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"}
+  - {name: google-news, type: rss, every: 15, credibility: 0.6,
+     url: "https://news.google.com/rss/search?q={query}+when:1d&hl=en-US&gl=US&ceid=US:en"}
+
+  # --- filings ------------------------------------------------------------------
+  - {name: sec-8k, type: sec, every: 15}                 # needs SEC_USER_AGENT="Your Name you@example.com"
+
+  # --- crypto press -------------------------------------------------------------
+  - {name: coindesk, type: rss, every: 5, credibility: 0.7,
+     url: "https://www.coindesk.com/arc/outboundfeeds/rss/"}
+  - {name: cointelegraph, type: rss, every: 5, credibility: 0.55,
+     url: "https://cointelegraph.com/rss"}
+  - {name: decrypt, type: rss, every: 10, credibility: 0.55,
+     url: "https://decrypt.co/feed"}
+  - {name: cryptopanic, type: cryptopanic, every: 5}     # needs CRYPTOPANIC_TOKEN
+
+  # --- social -------------------------------------------------------------------
+  - {name: reddit, type: reddit, every: 10, min_score: 20,
+     subreddits: [wallstreetbets, stocks, investing, CryptoCurrency, Bitcoin]}
+  - name: x
+    type: x                                              # needs X_BEARER_TOKEN
+    every: 15
+    min_followers: 5000
+    max_results: 50
+    accounts: [federalreserve, SECGov, WhiteHouse, tier10k, WatcherGuru, DeItaone]
+    trusted: {federalreserve: 1.0, SECGov: 1.0, WhiteHouse: 0.9}
+
+  # anything else: drop JSON lines into this folder, or POST /api/news/ingest
+  - {name: inbox, type: jsonl, path: news_inbox, every: 1}

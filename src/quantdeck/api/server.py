@@ -53,8 +53,10 @@ class _FailureLimiter:
             self._fails[ip].append(time.monotonic())
 
 
-def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, token: str | None = None) -> FastAPI:
+def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, token: str | None = None,
+               news_db: str | Path | None = None) -> FastAPI:
     runs = Path(runs_dir)
+    news_path = Path(news_db) if news_db else runs / "news" / "news.db"
     state = {"jobs": jobs}
     limiter = _FailureLimiter()
 
@@ -166,6 +168,68 @@ def create_app(runs_dir: str | Path = "runs", jobs: JobManager | None = None, to
         # the runner checks for this file every poll and shuts down cleanly
         (run_dir(name) / "STOP").touch()
         return {"ok": True}
+
+    # --- news -----------------------------------------------------------------
+
+    def news_store():
+        from ..news.store import NewsStore
+
+        if not news_path.exists():
+            return None
+        return NewsStore(news_path, readonly=True)
+
+    @app.get("/api/news/verdicts")
+    def news_verdicts():
+        st = news_store()
+        if st is None:
+            return {"available": False, "verdicts": [], "sources": []}
+        try:
+            return {"available": True, "verdicts": st.latest_verdicts(), "sources": st.sources()}
+        finally:
+            st.close()
+
+    @app.get("/api/news/items")
+    def news_items(symbol: str | None = None, limit: int = 100, hours: float = 72):
+        st = news_store()
+        if st is None:
+            return []
+        try:
+            return st.items(symbol, limit=min(max(limit, 1), 500), hours=min(max(hours, 1), 24 * 30))
+        finally:
+            st.close()
+
+    @app.get("/api/news/history")
+    def news_history(symbol: str, hours: float = 72):
+        st = news_store()
+        if st is None:
+            return []
+        try:
+            return st.verdict_history(symbol, hours=min(max(hours, 1), 24 * 30))
+        finally:
+            st.close()
+
+    @app.post("/api/news/ingest", status_code=202)
+    def news_ingest(payload: dict = Body(...)):
+        """Queue items from an outside collector; `news watch` tags and scores them next cycle."""
+        rows = payload.get("items") if isinstance(payload.get("items"), list) else [payload]
+        if not rows or len(rows) > 500:
+            raise HTTPException(400, "send 1-500 items")
+        clean = []
+        for r in rows:
+            if not isinstance(r, dict) or not str(r.get("title", "")).strip():
+                raise HTTPException(400, "every item needs a title")
+            keep = {k: r[k] for k in ("title", "body", "url", "author", "published_at", "symbols", "engagement",
+                                      "credibility", "kind", "lang", "id") if k in r}
+            if keep.get("kind") not in (None, "official", "newswire", "media", "social", "filing"):
+                raise HTTPException(400, f"bad kind {keep['kind']!r}")
+            clean.append(keep)
+        inbox = news_path.parent / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        name = f"api-{time.time_ns()}.jsonl"
+        tmp = inbox / (name + ".tmp")
+        tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in clean) + "\n", encoding="utf-8")
+        tmp.replace(inbox / name)
+        return {"queued": len(clean)}
 
     if WEB_DIR.exists():
         app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")

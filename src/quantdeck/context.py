@@ -73,6 +73,8 @@ class Context:
         self._peak: dict[str, float] = {}
         self._protective: dict[str, float | None] = {}  # order id -> take-profit price
         self.rejected: list[Order] = []
+        self.news_reader = None  # set by the live runner when `news.db` is configured
+        self.news_gate: tuple[float | None, float | None] = (None, None)
 
     # --- engine side --------------------------------------------------------
 
@@ -138,6 +140,39 @@ class Context:
 
     def price(self, symbol: str) -> float:
         return self._prices.get(symbol, 0.0)
+
+    # --- news ---------------------------------------------------------------
+
+    def news(self, symbol: str) -> dict | None:
+        """Latest news verdict for a symbol (or "MARKET:stock" / "MARKET:crypto").
+
+        A dict with score (-1..1), label, confidence and the top drivers, or
+        None in backtests, when no news database is configured, or when the
+        verdict is stale.
+        """
+        return self.news_reader.verdict(symbol) if self.news_reader else None
+
+    def news_score(self, symbol: str, default: float = 0.0) -> float:
+        v = self.news(symbol)
+        return default if v is None else float(v["score"])
+
+    def _news_block(self, symbol: str, side: Side, qty: float) -> str | None:
+        lo, hi = self.news_gate
+        if self.news_reader is None or (lo is None and hi is None):
+            return None
+        projected = self.position(symbol) + self.pending_qty(symbol)
+        opening_long = side == Side.BUY and projected >= -1e-9
+        opening_short = side == Side.SELL and projected - qty < -1e-9
+        if not (opening_long or opening_short):
+            return None
+        v = self.news(symbol)
+        if v is None:
+            return None
+        if opening_long and lo is not None and v["score"] < lo:
+            return f"news {v['label']} ({v['score']:+.2f})"
+        if opening_short and hi is not None and v["score"] > hi:
+            return f"news {v['label']} ({v['score']:+.2f})"
+        return None
 
     # --- portfolio ----------------------------------------------------------
 
@@ -348,7 +383,8 @@ class Context:
         order = Order(symbol, side, float(qty), otype, limit_price=limit, stop_price=stop, created_at=self.now)
 
         ref_price = limit or stop or self.price(symbol)
-        reason = self.risk.check(order, ref_price, self.account, self._projected(), self._prices)
+        reason = self._news_block(symbol, side, qty) or \
+            self.risk.check(order, ref_price, self.account, self._projected(), self._prices)
         if reason:
             order.status = OrderStatus.REJECTED
             order.reason = reason
