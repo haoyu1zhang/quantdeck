@@ -25,3 +25,9 @@ services:
   watchdog:
     <<: *common
     command: ["watchdog", "--stale", "600"]
+
+  news:
+    <<: *common
+    # cp examples/news.yaml configs/news.yaml, then: docker compose --profile news up -d
+    command: ["news", "watch", "configs/news.yaml"]
+    profiles: [news]

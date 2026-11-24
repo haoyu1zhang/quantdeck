@@ -16,7 +16,7 @@ from email.message import EmailMessage
 
 log = logging.getLogger(__name__)
 
-EVENTS = ("start", "stop", "fill", "stop_hit", "halt", "error", "stale")
+EVENTS = ("start", "stop", "fill", "stop_hit", "halt", "error", "stale", "news")
 
 
 def _post_json(url: str, payload: dict, timeout: float = 10) -> None:

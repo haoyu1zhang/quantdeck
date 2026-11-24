@@ -22,6 +22,7 @@ paper and live runs are doing.
 - Live trading with a pre-trade risk layer: order size, position size, gross exposure and daily loss limits, plus a kill switch
 - Stop-loss / take-profit orders that rest at the broker, so positions stay protected if the bot goes down
 - Telegram, webhook (Slack, Discord, WeCom, Feishu, DingTalk) and email alerts, plus a watchdog for runs that stop responding
+- News feed with a bullish / bearish verdict per symbol: RSS, Alpaca (Benzinga), SEC filings, Reddit, CryptoPanic, X and anything you push in, scored by an LLM with a rule-based fallback, and an optional gate that blocks new entries on strongly negative news
 - Runs recorded in SQLite; dashboard with token login; Docker setup
 
 ## Install
@@ -145,6 +146,134 @@ quantdeck watchdog --stale 600   # alert when a run's heartbeat is 10 minutes ol
 - Ten loop errors in a row halt new entries
 - A pid lock stops the same run from being started twice
 
+## News and sentiment
+
+`quantdeck news` collects headlines and posts about your watchlist, rates
+each one, and rolls them up into a verdict per symbol: strong bearish,
+bearish, neutral, bullish or strong bullish, with a score from -1 to 1 and
+a confidence.
+
+```bash
+quantdeck news fetch examples/news.yaml            # one pass over every source, prints verdicts
+quantdeck news watch examples/news.yaml            # keep going; alerts on strong verdicts
+quantdeck news report examples/news.yaml --symbol NVDA --lang zh
+quantdeck serve --news-config examples/news.yaml   # News tab, with a refresh button and manual adds
+```
+
+You don't have to keep `news watch` running. Start the dashboard with
+`--news-config` and use **Refresh now** in the News tab whenever you want a
+fresh pass, and **Add a post or headline** to paste in something you saw
+(an X post, a Telegram message, a headline from a paid terminal). Pasted
+items go through the same tagging and scoring as everything else.
+
+![news view](docs/news.png)
+
+<sub>Screenshot uses demo headlines.</sub>
+
+### Sources
+
+| type | what | needs |
+|---|---|---|
+| `rss` | any RSS or Atom feed; `{symbol}` / `{query}` in the URL fetches it per symbol (Yahoo Finance, Google News) | nothing |
+| `alpaca` | Alpaca's news API, which carries the Benzinga wire | Alpaca keys (a free paper account works) |
+| `sec` | 8-K filings for each stock, with the item numbers spelled out | `SEC_USER_AGENT` (name and email) |
+| `reddit` | new posts from the subreddits you list | optional `REDDIT_CLIENT_ID` / `_SECRET` |
+| `cryptopanic` | crypto news with reader votes | `CRYPTOPANIC_TOKEN` |
+| `twitterapi_io` | X posts through TwitterAPI.io (cashtags, accounts, custom queries), about $0.15 per 1,000 posts | `TWITTERAPI_IO_KEY` |
+| `x` | the same searches through X's official API v2, pay per use at about $5 per 1,000 posts | `X_BEARER_TOKEN` |
+| `jsonl` | JSON lines dropped into a folder | nothing |
+| `pkg.module:Class` | your own subclass of `quantdeck.news.sources.Source` | |
+
+Every source has its own polling interval (`every`, minutes). A failing
+source is logged and skipped; the others carry on. Both X sources take
+`daily_limit`, a cap on posts read per UTC day, since busy cashtags like
+`$BTC` or `$NVDA` produce far more posts than are worth paying for.
+
+To plug in a collector of your own (a different X client, Telegram
+channels, a paid data feed), either write a `Source` subclass or post items
+to the dashboard server:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/news/ingest -H 'Content-Type: application/json' \
+  -d '{"items": [{"title": "$NVDA wins Pentagon contract", "kind": "social", "credibility": 0.5,
+                  "engagement": {"likes": 900, "reposts": 120}}]}'
+```
+
+They're picked up on the next `news watch` cycle and handled like
+everything else.
+
+### Scoring
+
+Each item is tagged with the watchlist symbols it mentions (cashtags,
+tickers, company and coin names), grouped with near-identical headlines
+from other outlets, and scored:
+
+- **LLM** (`llm.provider: auto`): Claude with `ANTHROPIC_API_KEY`, or any
+  OpenAI-compatible API with `OPENAI_API_KEY`, or `NEWS_LLM_API_KEY` plus
+  `NEWS_LLM_BASE_URL` (DeepSeek, Qwen, a local model). Items go in batches;
+  the model returns direction (-1..1), impact (1-5), confidence, horizon,
+  and whether the item is about specific assets, a whole market, or the
+  macro picture.
+- **Rules**: about 70 finance-specific phrases (beats/misses, guidance,
+  downgrades, hacks, ETF approvals, rate decisions, Chinese headlines ...).
+  Used on their own without an LLM key, as the fallback when a call fails,
+  and as a cross-check: a strong rule pointing the other way lowers the
+  LLM's confidence.
+
+Each item then gets a weight:
+
+```
+weight = credibility × impact × confidence × recency × engagement × corroboration
+```
+
+| factor | |
+|---|---|
+| credibility | by source kind: official 1.0, filing 0.9, newswire 0.85, media 0.65, social 0.3. Override per source; for X it's per author, from followers and verification, with a `trusted:` list for official accounts |
+| impact, confidence | from the scorer |
+| recency | halves every 4h / 24h / 96h for intraday / days / weeks news |
+| engagement | up to ×1.6 from likes, reposts, replies and votes (social only) |
+| corroboration | up to ×1.75 when several different sources carry the story |
+
+A story syndicated to twenty sites counts once, with the corroboration
+bonus. Market-wide and macro items (Fed, CPI, tariffs, crypto regulation)
+feed `MARKET:stock` / `MARKET:crypto` and count toward every symbol in that
+market at `macro_beta` (0.5).
+
+```
+score = Σ(weight × direction) / (Σ weight + prior)
+```
+
+The prior keeps the score near zero when there's little news, so one
+headline doesn't flip a symbol to strong bearish. Confidence combines how
+much the evidence agrees with how much of it there is. Labels use
+`thresholds` (strong at ±0.45, weak at ±0.15).
+
+### Using it in a strategy
+
+Point a paper or live config at the news database:
+
+```yaml
+news:
+  db: runs/news/news.db
+  max_age_minutes: 60        # verdicts older than this count as none
+  block_longs_below: -0.45   # optional: refuse new longs on strong bearish news
+  block_shorts_above: 0.45   # optional: refuse new shorts on strong bullish news
+```
+
+The gate only stops orders that open or add to a position; exits and stops
+always go through. Strategies can also read verdicts directly:
+
+```python
+def on_bar(self, ctx, bar):
+    if ctx.news_score(bar.symbol) < -0.3:
+        return
+    v = ctx.news("MARKET:crypto")   # dict with score, label, confidence, drivers; None if unavailable
+```
+
+Backtests have no news (`ctx.news` returns None, `news_score` the default),
+because there is no point-in-time archive to replay. Treat the verdicts as
+a filter you've watched on paper for a while, not as a backtested signal.
+
 ## Finding parameters without fooling yourself
 
 ```bash
@@ -215,6 +344,12 @@ notify:
 strategy:
   name: sma_cross
   params: {fast: 20, slow: 50}
+
+news:                     # paper / live only, see "News and sentiment"
+  db: null
+  max_age_minutes: 60
+  block_longs_below: null
+  block_shorts_above: null
 ```
 
 ## Writing a strategy
@@ -286,6 +421,11 @@ mkdir configs && cp examples/btc_paper_testnet.yaml configs/bot.yaml
 docker compose up -d            # dashboard, one bot, watchdog
 ```
 
+For the news collector, copy `examples/news.yaml` to `configs/news.yaml` and
+start it with `docker compose --profile news up -d`. To refresh by hand from
+the dashboard instead, set `QUANTDECK_NEWS_CONFIG=configs/news.yaml` in `.env`. The dashboard's News tab
+and any bot with `news.db: runs/news/news.db` read from the same database.
+
 The dashboard is bound to 127.0.0.1 on the host. To reach it from elsewhere,
 put a reverse proxy with TLS in front of it. `quantdeck serve` won't listen on
 a public address unless `QUANTDECK_TOKEN` is set. Each bot is its own service,
@@ -309,6 +449,7 @@ src/quantdeck/
   brokers/       sim, alpaca, ccxt
   data/          sources (ccxt, alpaca, csv) and parquet cache
   live/          runner, market clock, run lock, watchdog
+  news/          news sources, dedup, LLM and rule scoring, verdicts
   strategies/    base class and built-ins
   api/           FastAPI app and backtest job queue
   web/           dashboard (plain HTML/JS, no build step)
@@ -341,6 +482,7 @@ block US traffic will fail there.
 - Market data is polled, not streamed. Fine for 5-minute bars and up; too slow for anything that needs to react within seconds
 - Backtests use bar data, so the order of high and low inside a bar is unknown. When a bar reaches both a stop and its take-profit, the stop is assumed to fill
 - Stock data defaults to Alpaca's free IEX feed, which covers a slice of total volume
+- News verdicts can't be backtested, and the rule scorer reads headlines literally. Headlines also tend to arrive after the price has moved
 - Risk limits are per process. Strategies sharing one account don't see each other's positions
 
 ## Disclaimer

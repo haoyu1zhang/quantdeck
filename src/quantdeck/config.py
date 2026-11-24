@@ -65,6 +65,15 @@ class NotifyConfig:
 
 
 @dataclass
+class NewsLinkConfig:
+    # verdicts written by `quantdeck news watch`; paper and live runs only
+    db: Optional[str] = None
+    max_age_minutes: float = 60        # older verdicts count as no verdict
+    block_longs_below: Optional[float] = None   # e.g. -0.45: no new longs on strong bearish news
+    block_shorts_above: Optional[float] = None  # e.g. 0.45: no new shorts on strong bullish news
+
+
+@dataclass
 class StrategyConfig:
     name: str = "sma_cross"
     params: dict = field(default_factory=dict)
@@ -86,6 +95,7 @@ class Config:
     risk: RiskConfig = field(default_factory=RiskConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    news: NewsLinkConfig = field(default_factory=NewsLinkConfig)
 
     def validate(self) -> None:
         if self.mode not in MODES:
@@ -113,6 +123,7 @@ _SECTIONS = {
     "risk": RiskConfig,
     "strategy": StrategyConfig,
     "notify": NotifyConfig,
+    "news": NewsLinkConfig,
 }
 
 

@@ -28,5 +28,14 @@ def test_live_mode_guards():
 def test_example_configs_load():
     from pathlib import Path
 
+    from quantdeck.news import load_news_config
+    from quantdeck.news.sources import make_source
+    from quantdeck.news.symbols import Watchlist
+
     for p in Path(__file__).parent.parent.joinpath("examples").glob("*.yaml"):
-        load_config(p)
+        if p.name == "news.yaml":
+            cfg = load_news_config(p)
+            wl = Watchlist(cfg.stock, cfg.crypto)
+            assert all(make_source(s, wl) for s in cfg.sources)
+        else:
+            load_config(p)

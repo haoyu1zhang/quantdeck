@@ -145,7 +145,9 @@ def cmd_serve(args) -> int:
     if token and len(token) < 16:
         print("QUANTDECK_TOKEN should be at least 16 characters")
         return 2
-    uvicorn.run(create_app(args.runs_dir, token=token), host=args.host, port=args.port, log_level="info")
+    app = create_app(args.runs_dir, token=token, news_db=args.news_db,
+                     news_config=args.news_config or os.environ.get("QUANTDECK_NEWS_CONFIG"))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 
@@ -172,6 +174,106 @@ def cmd_notify_test(args) -> int:
     n.notify("start", "quantdeck test message", "if you can read this, notifications work")
     n.flush(15)
     print("sent via " + ", ".join(c.name for c in channels))
+    return 0
+
+
+def _news_label(label: str, lang: str) -> str:
+    from .news import LABELS_ZH
+
+    return LABELS_ZH[label] if lang == "zh" else label.replace("_", " ")
+
+
+def print_verdicts(verdicts: list[dict], lang: str = "en", drivers: int = 1) -> None:
+    if not verdicts:
+        print("no verdicts yet")
+        return
+    print(f"{'symbol':<16}{'verdict':<16}{'score':>7}{'conf':>7}{'items':>7}")
+    for v in sorted(verdicts, key=lambda v: (not v["symbol"].startswith("MARKET:"), -abs(v["score"]))):
+        print(f"{v['symbol']:<16}{_news_label(v['label'], lang):<16}{v['score']:>+7.2f}"
+              f"{v['confidence']:>7.0%}{v['items']:>7}")
+        for d in v["drivers"][:drivers]:
+            arrow = "+" if d["direction"] > 0 else "-" if d["direction"] < 0 else "="
+            print(f"{'':<4}{arrow} [{d['source']}] {d['title'][:100]}")
+
+
+def _news_notifier(cfg):
+    from .notify import Notifier, channels_from_env
+
+    channels = channels_from_env()
+    return Notifier(channels, events=["news"], prefix="[news] ", cooldown=cfg.alerts.cooldown) if channels else None
+
+
+def cmd_news_fetch(args) -> int:
+    from .news import NewsPipeline, load_news_config
+
+    cfg = load_news_config(args.config)
+    pipe = NewsPipeline(cfg, notifier=_news_notifier(cfg) if args.alerts else None)
+    print(f"scorer: {pipe.scorer.name}")
+    rep = pipe.run_once(force=True)
+    for name in sorted(set(rep.fetched) | set(rep.errors)):
+        print(f"  {name:<20}{rep.errors[name] if name in rep.errors else str(rep.fetched[name]) + ' items'}")
+    print(f"{rep.new_items} new, {rep.scored} scored in {rep.seconds:.1f}s\n")
+    print_verdicts([v.as_dict() for v in rep.verdicts], args.lang or cfg.alerts.lang, drivers=args.drivers)
+    if pipe.notifier:
+        pipe.notifier.flush(10)
+    return 0
+
+
+def cmd_news_watch(args) -> int:
+    import signal
+
+    from .news import NewsPipeline, load_news_config
+
+    cfg = load_news_config(args.config)
+    if args.interval:
+        cfg.interval = args.interval
+    _setup_logging(args.verbose, cfg.db_path.parent / "news.log")
+    log = logging.getLogger("quantdeck.news")
+    pipe = NewsPipeline(cfg, notifier=_news_notifier(cfg))
+    signal.signal(signal.SIGINT, pipe.stop)
+    signal.signal(signal.SIGTERM, pipe.stop)
+    log.info("watching %d sources, scorer %s, every %ds", len(pipe.sources), pipe.scorer.name, cfg.interval)
+
+    def report(rep):
+        moved = ", ".join(f"{v.symbol} {v.label} {v.score:+.2f}" for v in rep.verdicts if v.label != "neutral")
+        log.info("cycle: %d fetched, %d new, %d scored, %d errors, %.1fs%s",
+                 sum(rep.fetched.values()), rep.new_items, rep.scored, len(rep.errors), rep.seconds,
+                 f" | {moved}" if moved else "")
+        for a in rep.alerts:
+            log.info("alert: %s", a)
+
+    pipe.watch(max_cycles=args.cycles, on_cycle=report)
+    if pipe.notifier:
+        pipe.notifier.flush(5)
+    return 0
+
+
+def cmd_news_report(args) -> int:
+    from .news import NewsStore, load_news_config
+
+    cfg = load_news_config(args.config)
+    if not cfg.db_path.exists():
+        print(f"{cfg.db_path} doesn't exist yet; run `quantdeck news fetch {args.config}` first")
+        return 1
+    st = NewsStore(cfg.db_path, readonly=True)
+    try:
+        if args.symbol:
+            v = st.latest_verdict(args.symbol.upper())
+            if v is None:
+                print(f"no verdict for {args.symbol}")
+                return 1
+            print_verdicts([v], args.lang or cfg.alerts.lang, drivers=0)
+            print()
+            for it in st.items(args.symbol.upper(), limit=args.limit):
+                d = it.get("direction")
+                arrow = "  " if d is None else "+" if d > 0.05 else "-" if d < -0.05 else "="
+                print(f"{arrow} {it['published_at'][:16]} [{it['source']}] {it['title'][:110]}")
+                if it.get("reason"):
+                    print(f"     {it['reason'][:140]}")
+        else:
+            print_verdicts(st.latest_verdicts(), args.lang or cfg.alerts.lang, drivers=args.drivers)
+    finally:
+        st.close()
     return 0
 
 
@@ -233,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--runs-dir", default="runs")
+    s.add_argument("--news-db", default="runs/news/news.db", help="news database for the News tab")
+    s.add_argument("--news-config", help="news config; enables the refresh button and manual adds in the News tab")
     s.set_defaults(func=cmd_serve)
 
     w = sub.add_parser("watchdog", help="alert when a paper/live run stops sending heartbeats")
@@ -244,11 +348,32 @@ def main(argv: list[str] | None = None) -> int:
     nt = sub.add_parser("notify-test", help="send a test notification")
     nt.set_defaults(func=cmd_notify_test)
 
+    nw = sub.add_parser("news", help="collect news and score it bullish / bearish")
+    nsub = nw.add_subparsers(dest="news_cmd", required=True)
+    nf = nsub.add_parser("fetch", help="fetch every source once, score, print verdicts")
+    nf.add_argument("config")
+    nf.add_argument("--lang", choices=["en", "zh"])
+    nf.add_argument("--drivers", type=int, default=2, help="top headlines to show per symbol")
+    nf.add_argument("--alerts", action="store_true", help="also send alerts for strong verdicts")
+    nf.set_defaults(func=cmd_news_fetch)
+    nwt = nsub.add_parser("watch", help="keep collecting and scoring, send alerts")
+    nwt.add_argument("config")
+    nwt.add_argument("--interval", type=int, help="seconds between cycles (overrides the config)")
+    nwt.add_argument("--cycles", type=int, help="stop after N cycles")
+    nwt.set_defaults(func=cmd_news_watch)
+    nr = nsub.add_parser("report", help="print the latest verdicts, or the news behind one symbol")
+    nr.add_argument("config")
+    nr.add_argument("--symbol", help="e.g. NVDA, BTC, MARKET:crypto")
+    nr.add_argument("--limit", type=int, default=20)
+    nr.add_argument("--lang", choices=["en", "zh"])
+    nr.add_argument("--drivers", type=int, default=2)
+    nr.set_defaults(func=cmd_news_report)
+
     st = sub.add_parser("strategies", help="list built-in strategies")
     st.set_defaults(func=cmd_strategies)
 
     args = p.parse_args(argv)
-    if args.cmd != "run":
+    if args.cmd != "run" and getattr(args, "news_cmd", None) != "watch":
         _setup_logging(args.verbose)
     return args.func(args)
 
