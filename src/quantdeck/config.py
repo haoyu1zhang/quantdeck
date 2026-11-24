@@ -36,6 +36,7 @@ class FeeConfig:
     per_share: float = 0.0
     minimum: float = 0.0
     slippage: float = 0.0005     # fraction of price, applied against us
+    max_volume_pct: Optional[float] = None  # backtest: cap each fill at this share of bar volume
 
 
 @dataclass
@@ -46,6 +47,21 @@ class RiskConfig:
     max_daily_loss_pct: Optional[float] = None
     max_orders_per_day: Optional[int] = None
     allow_short: bool = False
+    # exits placed at the broker as soon as a position opens, so they still work if we crash
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    trailing_stop: bool = False
+
+
+@dataclass
+class NotifyConfig:
+    # channels: None = on if its environment variables are set, false = off, true = required.
+    # webhook may also name the format: slack, discord, wecom, feishu, dingtalk
+    telegram: Optional[bool] = None
+    webhook: Any = None
+    email: Optional[bool] = None
+    events: list = field(default_factory=lambda: ["start", "stop", "fill", "stop_hit", "halt", "error"])
+    cooldown: int = 300
 
 
 @dataclass
@@ -69,6 +85,7 @@ class Config:
     fees: FeeConfig = field(default_factory=FeeConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
 
     def validate(self) -> None:
         if self.mode not in MODES:
@@ -95,6 +112,7 @@ _SECTIONS = {
     "fees": FeeConfig,
     "risk": RiskConfig,
     "strategy": StrategyConfig,
+    "notify": NotifyConfig,
 }
 
 

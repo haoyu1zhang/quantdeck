@@ -11,7 +11,8 @@ from ..context import Context
 from ..models import Bar, Fill, Order
 from ..risk import RiskManager
 from ..strategies.base import Strategy
-from ..timeframes import parse_timeframe, periods_per_year
+from ..data.store import to_utc
+from ..timeframes import parse_timeframe, periods_per_year, trading_day
 from .metrics import compute_metrics, round_trips
 
 log = logging.getLogger(__name__)
@@ -67,7 +68,13 @@ def run_backtest(
     market: str = "crypto",
     timeframe: str = "1d",
     fractional: bool = True,
+    start_at=None,
 ) -> BacktestResult:
+    """Run `strategy` over `data`.
+
+    Bars before `start_at` only warm up the strategy: it sees them but can't
+    trade, and they aren't part of the equity curve or metrics.
+    """
     if not data:
         raise ValueError("no data")
     data = {s: _check_frame(s, df) for s, df in data.items()}
@@ -77,66 +84,85 @@ def run_backtest(
     broker = SimBroker(cash, fees, fractional=fractional, allow_short=risk_cfg.allow_short)
     rm = RiskManager(risk_cfg)
     ctx = Context(broker, rm, symbols, fractional=fractional)
+    ctx.periods_per_year = periods_per_year(parse_timeframe(timeframe), market)
 
-    # long format, one row per (ts, symbol), so multiple symbols interleave correctly
-    frames = []
+    # plain numpy per symbol; iterating DataFrames row by row is far too slow
+    timestamps = data[symbols[0]].index
+    for df in list(data.values())[1:]:
+        timestamps = timestamps.union(df.index)
+    cols = {}
     for s, df in data.items():
-        f = df[["open", "high", "low", "close", "volume"]].copy()
-        f["symbol"] = s
-        frames.append(f)
-    allbars = pd.concat(frames).sort_index(kind="stable")
-    timestamps = allbars.index.unique()
+        aligned = df.reindex(timestamps)
+        cols[s] = (
+            aligned[["open", "high", "low", "close", "volume"]].to_numpy(dtype=float),
+            ~aligned["close"].isna().to_numpy(),
+        )
+    ts_list = list(timestamps)
+    start_ts = to_utc(start_at) if start_at is not None else None
 
-    eq_vals, expo_vals = [], []
+    eq_ts, eq_vals, expo_vals = [], [], []
+    ctx.trading = start_ts is None
     strategy.on_start(ctx)
 
-    grouped = allbars.groupby(level=0, sort=True)
-    for ts, rows in grouped:
-        bars = [
-            Bar(r.symbol, ts, r.open, r.high, r.low, r.close, r.volume)
-            for r in rows.itertuples(index=False)
-        ]
+    for i, ts in enumerate(ts_list):
+        if not ctx.trading and ts >= start_ts:
+            ctx.trading = True
+        bars = []
+        for s in symbols:
+            arr, present = cols[s]
+            if present[i]:
+                o, h, lo, c, v = arr[i]
+                bars.append(Bar(s, ts, o, h, lo, c, v))
 
         # 1. fill whatever was queued last bar, at this bar's prices
-        for b in bars:
-            broker.process_bar(b)
+        broker.process_bars(bars)
         new_fills = broker.sync()
 
         ctx.now = ts
         ctx.refresh()
-        rm.new_day(ts.date(), ctx.equity)
+        rm.new_day(trading_day(ts, market), ctx.equity)
         for f in new_fills:
             strategy.on_fill(ctx, f)
 
         # 2. strategy sees the completed bar
         for b in bars:
             ctx.push_bar(b)
-        ctx.refresh()
+        if new_fills:
+            ctx.refresh()
+        else:
+            ctx.mark_prices()
         rm.update_equity(ctx.equity)
         for b in bars:
             strategy.on_bar(ctx, b)
+        ctx.sync_protection()
 
-        acct = broker.account()
-        eq_vals.append(acct.equity)
-        gross = sum(abs(p.market_value) for p in broker.positions().values())
-        expo_vals.append(gross / acct.equity if acct.equity > 0 else 0.0)
+        if ctx.trading:
+            acct = broker.account()
+            eq_ts.append(ts)
+            eq_vals.append(acct.equity)
+            gross = sum(abs(p.market_value) for p in broker.positions().values())
+            expo_vals.append(gross / acct.equity if acct.equity > 0 else 0.0)
 
     strategy.on_stop(ctx)
+    if not eq_ts:
+        raise ValueError("start_at is after the last bar")
 
-    equity = pd.Series(eq_vals, index=timestamps, name="equity")
-    exposure = pd.Series(expo_vals, index=timestamps, name="exposure")
+    index = pd.DatetimeIndex(eq_ts)
+    equity = pd.Series(eq_vals, index=index, name="equity")
+    exposure = pd.Series(expo_vals, index=index, name="exposure")
+    start_equity = float(equity.iloc[0]) if start_ts is not None else cash
 
     # equal-weight buy and hold of the same symbols, for comparison
-    closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).reindex(timestamps).ffill()
+    closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).reindex(index).ffill()
     first = closes.bfill().iloc[0]
-    benchmark = (closes / first).mean(axis=1) * cash
+    benchmark = (closes / first).mean(axis=1) * start_equity
     benchmark.name = "benchmark"
 
     tf = parse_timeframe(timeframe)
     ppy = periods_per_year(tf, market)
-    trades = round_trips(broker.fills, timestamps)
+    trades = round_trips(broker.fills, index)
     metrics = compute_metrics(equity, trades, ppy, exposure)
-    metrics["benchmark_return"] = float(benchmark.iloc[-1] / cash - 1)
+    metrics["benchmark_return"] = float(benchmark.iloc[-1] / start_equity - 1)
     metrics["rejected_orders"] = len(ctx.rejected)
 
     return BacktestResult(

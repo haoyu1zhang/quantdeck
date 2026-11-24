@@ -1,5 +1,8 @@
 import re
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+NY = ZoneInfo("America/New_York")
 
 _UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
 
@@ -20,3 +23,10 @@ def periods_per_year(tf: timedelta, market: str) -> float:
         # regular session is 6.5h
         return 252 * (timedelta(hours=6, minutes=30) / tf)
     return timedelta(days=365) / tf
+
+
+def trading_day(ts: datetime, market: str) -> date:
+    """The session a timestamp belongs to: New York date for stocks, UTC date for crypto."""
+    if market == "stock":
+        return ts.astimezone(NY).date()
+    return ts.date() if ts.tzinfo is None else ts.astimezone(ZoneInfo("UTC")).date()

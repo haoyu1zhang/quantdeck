@@ -41,6 +41,13 @@ class Broker(ABC):
     def close(self) -> None:
         pass
 
+    def to_state(self) -> dict:
+        """Anything worth keeping across restarts."""
+        return {}
+
+    def load_state(self, state: dict) -> None:
+        pass
+
 
 class _FillTracker:
     """Turns order snapshots into fill events for brokers that only expose order state."""

@@ -19,12 +19,17 @@ class RiskManager:
         self._day: date | None = None
         self._day_start_equity = 0.0
         self._orders_today = 0
+        self._daily_halt = False
 
     def new_day(self, day: date, equity: float) -> None:
         if day != self._day:
             self._day = day
             self._day_start_equity = equity
             self._orders_today = 0
+            if self._daily_halt:
+                # the daily loss limit is per day; other halts stay until someone restarts
+                self.halted, self.halt_reason, self._daily_halt = False, "", False
+                log.info("new trading day, daily loss halt lifted")
 
     def update_equity(self, equity: float) -> None:
         limit = self.cfg.max_daily_loss_pct
@@ -33,6 +38,7 @@ class RiskManager:
         loss = 1 - equity / self._day_start_equity
         if loss >= limit:
             self.halt(f"daily loss {loss:.2%} hit limit {limit:.2%}")
+            self._daily_halt = True
 
     def halt(self, reason: str) -> None:
         if not self.halted:

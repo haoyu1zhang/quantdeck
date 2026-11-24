@@ -180,6 +180,7 @@ class CcxtBroker(Broker):
             otype = "limit"
             price = float(self.client.price_to_precision(order.symbol, order.limit_price))
         elif order.type == OrderType.STOP:
+            order.take_profit = None  # spot has no portable OCO; the context watches it
             params["triggerPrice"] = float(self.client.price_to_precision(order.symbol, order.stop_price))
 
         def attempt():
@@ -237,6 +238,12 @@ class CcxtBroker(Broker):
                 self._tracker.forget(oid)
                 self._order_symbol.pop(oid, None)
         return fills
+
+    def to_state(self) -> dict:
+        return {"avg": dict(self._avg)}
+
+    def load_state(self, state: dict) -> None:
+        self._avg.update({k: float(v) for k, v in state.get("avg", {}).items()})
 
     def _update_avg(self, f: Fill) -> None:
         if f.side != Side.BUY:

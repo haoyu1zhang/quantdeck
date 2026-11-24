@@ -52,13 +52,25 @@ class AlpacaBroker(Broker):
         return self._alias.get(raw, raw)
 
     def _convert(self, o) -> Order:
-        order = Order(
+        otype = _val(o.order_type)
+        stop = float(o.stop_price) if o.stop_price else None
+        limit = float(o.limit_price) if o.limit_price else None
+        take_profit = None
+        if _val(getattr(o, "order_class", None)) == "oco":
+            # OCO comes back as the take-profit limit with the stop as a leg
+            for leg in getattr(o, "legs", None) or []:
+                if leg.stop_price:
+                    stop = float(leg.stop_price)
+            take_profit, limit, otype = limit, None, "stop"
+        if otype == "stop_limit":
+            otype, limit = "stop", None
+        return Order(
             symbol=self._sym(o.symbol),
             side=Side(_val(o.side)),
             qty=float(o.qty or 0),
-            type=OrderType(_val(o.order_type) if _val(o.order_type) in ("market", "limit", "stop") else "market"),
-            limit_price=float(o.limit_price) if o.limit_price else None,
-            stop_price=float(o.stop_price) if o.stop_price else None,
+            type=OrderType(otype) if otype in ("market", "limit", "stop") else OrderType.MARKET,
+            limit_price=limit,
+            stop_price=stop,
             tif=_val(o.time_in_force),
             client_id=o.client_order_id,
             id=str(o.id),
@@ -66,8 +78,8 @@ class AlpacaBroker(Broker):
             filled_qty=float(o.filled_qty or 0),
             avg_fill_price=float(o.filled_avg_price or 0),
             created_at=o.created_at or utcnow(),
+            take_profit=take_profit,
         )
-        return order
 
     def account(self) -> Account:
         a = self.client.get_account()
@@ -93,24 +105,7 @@ class AlpacaBroker(Broker):
         return [self._convert(o) for o in orders]
 
     def submit(self, order: Order) -> Order:
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, StopOrderRequest
-
-        # fractional stock orders must be DAY; crypto only supports GTC/IOC
-        tif = TimeInForce.GTC if self.market == "crypto" else TimeInForce.DAY
-        common = dict(
-            symbol=order.symbol,
-            qty=round(order.qty, 9),
-            side=OrderSide.BUY if order.side == Side.BUY else OrderSide.SELL,
-            time_in_force=tif,
-            client_order_id=order.client_id,
-        )
-        if order.type == OrderType.LIMIT:
-            req = LimitOrderRequest(limit_price=self._px(order.limit_price), **common)
-        elif order.type == OrderType.STOP:
-            req = StopOrderRequest(stop_price=self._px(order.stop_price), **common)
-        else:
-            req = MarketOrderRequest(**common)
+        req = self._request(order)
 
         def attempt():
             try:
@@ -134,6 +129,54 @@ class AlpacaBroker(Broker):
                  order.side.value, order.qty, order.symbol, order.id)
         return order
 
+    def _request(self, order: Order):
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            LimitOrderRequest,
+            MarketOrderRequest,
+            StopLimitOrderRequest,
+            StopLossRequest,
+            StopOrderRequest,
+            TakeProfitRequest,
+        )
+
+        whole = abs(order.qty - round(order.qty)) < 1e-9
+        if self.market == "crypto":
+            tif = TimeInForce.GTC
+        elif order.type != OrderType.MARKET and whole:
+            tif = TimeInForce.GTC  # resting exits should survive the close
+        else:
+            tif = TimeInForce.DAY  # fractional stock orders have to be DAY
+        common = dict(
+            symbol=order.symbol,
+            qty=round(order.qty, 9),
+            side=OrderSide.BUY if order.side == Side.BUY else OrderSide.SELL,
+            time_in_force=tif,
+            client_order_id=order.client_id,
+        )
+
+        if order.type == OrderType.LIMIT:
+            return LimitOrderRequest(limit_price=self._px(order.limit_price), **common)
+        if order.type == OrderType.STOP:
+            stop = self._px(order.stop_price)
+            if self.market == "crypto":
+                # crypto has no plain stop orders; a wide stop-limit behaves close to one
+                order.take_profit = None
+                limit = self._px(stop * (0.99 if order.side == Side.SELL else 1.01))
+                return StopLimitOrderRequest(stop_price=stop, limit_price=limit, **common)
+            if order.take_profit and whole and order.side == Side.SELL:
+                # one-cancels-other exit: the limit leg is the take-profit
+                return LimitOrderRequest(
+                    limit_price=self._px(order.take_profit),
+                    order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=self._px(order.take_profit)),
+                    stop_loss=StopLossRequest(stop_price=stop),
+                    **common,
+                )
+            order.take_profit = None  # can't attach it; the context watches it instead
+            return StopOrderRequest(stop_price=stop, **common)
+        return MarketOrderRequest(**common)
+
     def _by_client_id(self, client_id: str):
         try:
             return self.client.get_order_by_client_id(client_id)
@@ -152,14 +195,22 @@ class AlpacaBroker(Broker):
         fills = []
         for oid in self._tracker.tracked():
             try:
-                o = self._convert(self.client.get_order_by_id(oid))
+                raw = self.client.get_order_by_id(oid)
             except Exception as e:
                 log.warning("could not refresh order %s: %s", oid, e)
                 continue
+            # an OCO exit can fill through its stop leg, which has its own id
+            for leg in getattr(raw, "legs", None) or []:
+                self._tracker.track(Order(self._sym(leg.symbol), Side(_val(leg.side)), float(leg.qty or 0),
+                                          id=str(leg.id)))
+            o = self._convert(raw)
             f = self._tracker.diff(o, utcnow())
             if f:
                 fills.append(f)
-            if not o.status.is_open:
+            legs_open = any(
+                _STATUS.get(_val(leg.status), OrderStatus.NEW).is_open for leg in (getattr(raw, "legs", None) or [])
+            )
+            if not o.status.is_open and not legs_open:
                 self._tracker.forget(oid)
         return fills
 

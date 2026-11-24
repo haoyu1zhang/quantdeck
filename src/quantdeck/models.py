@@ -61,6 +61,8 @@ class Order:
     avg_fill_price: float = 0.0
     created_at: datetime = field(default_factory=utcnow)
     reason: str = ""
+    take_profit: Optional[float] = None  # stop orders only: one-cancels-other exit
+    protective: bool = False
 
     @property
     def remaining(self) -> float:
@@ -81,6 +83,8 @@ class Order:
             "avg_fill_price": self.avg_fill_price,
             "created_at": self.created_at.isoformat(),
             "reason": self.reason,
+            "take_profit": self.take_profit,
+            "protective": self.protective,
         }
 
 

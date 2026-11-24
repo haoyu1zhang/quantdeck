@@ -32,6 +32,7 @@ class SimBroker(Broker):
         self.allow_short = allow_short
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}
+        self._working: dict[str, Order] = {}  # open orders only, so matching stays O(open)
         self._last: dict[str, float] = {}
         self._new_fills: list[Fill] = []
         self.fills: list[Fill] = []
@@ -47,7 +48,7 @@ class SimBroker(Broker):
         return {s: p for s, p in self._positions.items() if abs(p.qty) > EPS}
 
     def open_orders(self) -> list[Order]:
-        return [o for o in self._orders.values() if o.status.is_open]
+        return [o for o in self._working.values() if o.status.is_open]
 
     def submit(self, order: Order) -> Order:
         order.id = f"sim-{next(self._ids)}"
@@ -63,12 +64,15 @@ class SimBroker(Broker):
             order.status = OrderStatus.REJECTED
             order.reason = "stop order without stop_price"
         self._orders[order.id] = order
+        if order.status.is_open:
+            self._working[order.id] = order
         return order
 
     def cancel(self, order_id: str) -> None:
         o = self._orders.get(order_id)
         if o and o.status.is_open:
             o.status = OrderStatus.CANCELED
+        self._working.pop(order_id, None)
 
     def sync(self) -> list[Fill]:
         out, self._new_fills = self._new_fills, []
@@ -98,10 +102,25 @@ class SimBroker(Broker):
         if symbol in self._positions:
             self._positions[symbol].last_price = price
 
-    def process_bar(self, bar: Bar) -> list[Fill]:
+    def process_bars(self, bars: list[Bar]) -> list[Fill]:
+        """Match one timestamp's bars. Sells go first so their proceeds can fund buys."""
         fills = []
-        for o in list(self._orders.values()):
-            if o.symbol != bar.symbol or not o.status.is_open:
+        for side in (Side.SELL, Side.BUY):
+            for bar in bars:
+                fills += self._process(bar, side)
+        for bar in bars:
+            self.mark(bar.symbol, bar.close)
+        for oid in [k for k, o in self._working.items() if not o.status.is_open]:
+            del self._working[oid]
+        return fills
+
+    def process_bar(self, bar: Bar) -> list[Fill]:
+        return self.process_bars([bar])
+
+    def _process(self, bar: Bar, side: Side) -> list[Fill]:
+        fills = []
+        for o in list(self._working.values()):
+            if o.symbol != bar.symbol or o.side != side or not o.status.is_open:
                 continue
             if o.created_at >= bar.ts:
                 # submitted during or after this bar; wait for the next one
@@ -111,7 +130,6 @@ class SimBroker(Broker):
                 f = self._execute(o, price, bar)
                 if f:
                     fills.append(f)
-        self.mark(bar.symbol, bar.close)
         return fills
 
     def _match(self, o: Order, bar: Bar) -> float | None:
@@ -127,11 +145,15 @@ class SimBroker(Broker):
                 return max(bar.open, lp)
             return None
         if o.type == OrderType.STOP:
-            sp = o.stop_price
+            sp, tp = o.stop_price, o.take_profit
             if buy and bar.high >= sp:
                 return max(bar.open, sp) * (1 + slip)
-            if not buy and bar.low <= sp:
-                return min(bar.open, sp) * (1 - slip)
+            if not buy:
+                # if a bar spans both legs we can't know which came first; assume the stop
+                if bar.low <= sp:
+                    return min(bar.open, sp) * (1 - slip)
+                if tp is not None and bar.high >= tp:
+                    return max(bar.open, tp)
         return None
 
     def _commission(self, qty: float, price: float) -> float:
@@ -141,6 +163,15 @@ class SimBroker(Broker):
     def _execute(self, o: Order, price: float, bar: Bar) -> Fill | None:
         qty = o.remaining
         pos = self._positions.get(o.symbol) or Position(o.symbol)
+        cash_limited = False
+
+        cap = self.fees.max_volume_pct
+        vol_limited = False
+        if cap and bar.volume > 0 and qty > bar.volume * cap:
+            qty = bar.volume * cap
+            if not self.fractional:
+                qty = math.floor(qty + EPS)
+            vol_limited = True
 
         if o.side == Side.BUY:
             cost = qty * price + self._commission(qty, price)
@@ -150,10 +181,14 @@ class SimBroker(Broker):
                 qty = max(self.cash - self.fees.minimum, 0.0) / per_unit
                 if not self.fractional:
                     qty = math.floor(qty + EPS)
-        elif not self.allow_short:
-            qty = min(qty, max(pos.qty, 0.0))
+                cash_limited = True
+        elif not self.allow_short and qty > max(pos.qty, 0.0) + EPS:
+            qty = max(pos.qty, 0.0)
+            cash_limited = True
 
         if qty <= EPS:
+            if vol_limited and not cash_limited:
+                return None  # volume cap rounded to zero this bar; try again next bar
             o.status = OrderStatus.REJECTED
             o.reason = "insufficient cash" if o.side == Side.BUY else "nothing to sell"
             return None
@@ -167,11 +202,14 @@ class SimBroker(Broker):
         new_filled = o.filled_qty + qty
         o.avg_fill_price = (o.avg_fill_price * o.filled_qty + price * qty) / new_filled
         o.filled_qty = new_filled
-        o.status = OrderStatus.FILLED if o.remaining <= EPS else OrderStatus.PARTIAL
-        if o.status == OrderStatus.PARTIAL:
-            # what's left couldn't be funded; don't leave it hanging
+        if o.remaining <= EPS:
+            o.status = OrderStatus.FILLED
+        elif cash_limited:
+            # the rest can't be funded (or there's nothing left to sell); don't leave it hanging
             o.status = OrderStatus.CANCELED
             o.reason = "partially filled, rest canceled"
+        else:
+            o.status = OrderStatus.PARTIAL  # volume-capped, keeps working next bar
 
         fill = Fill(o.id, o.symbol, o.side, qty, price, commission, bar.ts)
         self.fills.append(fill)
