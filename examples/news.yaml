@@ -74,12 +74,23 @@ sources:
   # --- social -------------------------------------------------------------------
   - {name: reddit, type: reddit, every: 10, min_score: 20,
      subreddits: [wallstreetbets, stocks, investing, CryptoCurrency, Bitcoin]}
+  # X: TwitterAPI.io is ~$0.15 per 1,000 posts, the official API ~$5 per 1,000.
+  # daily_limit caps posts read per UTC day on either one.
   - name: x
-    type: x                                              # needs X_BEARER_TOKEN
+    type: twitterapi_io                                  # needs TWITTERAPI_IO_KEY
     every: 15
+    daily_limit: 5000
     min_followers: 5000
-    max_results: 50
     accounts: [federalreserve, SECGov, WhiteHouse, tier10k, WatcherGuru, DeItaone]
+    trusted: {federalreserve: 1.0, SECGov: 1.0, WhiteHouse: 0.9}
+  - name: x-official
+    type: x                                              # needs X_BEARER_TOKEN
+    enabled: false
+    every: 15
+    daily_limit: 1000
+    max_results: 50
+    min_followers: 5000
+    accounts: [federalreserve, SECGov, WhiteHouse]
     trusted: {federalreserve: 1.0, SECGov: 1.0, WhiteHouse: 0.9}
 
   # anything else: drop JSON lines into this folder, or POST /api/news/ingest

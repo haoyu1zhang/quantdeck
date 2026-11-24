@@ -173,12 +173,15 @@ quantdeck serve                                    # News tab in the dashboard
 | `sec` | 8-K filings for each stock, with the item numbers spelled out | `SEC_USER_AGENT` (name and email) |
 | `reddit` | new posts from the subreddits you list | optional `REDDIT_CLIENT_ID` / `_SECRET` |
 | `cryptopanic` | crypto news with reader votes | `CRYPTOPANIC_TOKEN` |
-| `x` | X API v2 recent search: cashtags, accounts, custom queries | `X_BEARER_TOKEN` (a paid X API tier) |
+| `twitterapi_io` | X posts through TwitterAPI.io (cashtags, accounts, custom queries), about $0.15 per 1,000 posts | `TWITTERAPI_IO_KEY` |
+| `x` | the same searches through X's official API v2, pay per use at about $5 per 1,000 posts | `X_BEARER_TOKEN` |
 | `jsonl` | JSON lines dropped into a folder | nothing |
 | `pkg.module:Class` | your own subclass of `quantdeck.news.sources.Source` | |
 
 Every source has its own polling interval (`every`, minutes). A failing
-source is logged and skipped; the others carry on.
+source is logged and skipped; the others carry on. Both X sources take
+`daily_limit`, a cap on posts read per UTC day, since busy cashtags like
+`$BTC` or `$NVDA` produce far more posts than are worth paying for.
 
 To plug in a collector of your own (a different X client, Telegram
 channels, a paid data feed), either write a `Source` subclass or post items

@@ -13,7 +13,7 @@ from ..symbols import Watchlist
 from .base import Source, parse_time
 from .feeds import AlpacaNews, CryptoPanic, Reddit, SecFilings
 from .rss import RssSource
-from .x import XSearch
+from .x import TwitterApiIo, XSearch
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +65,8 @@ def item_from_dict(d: dict, src: Source):
 
 
 REGISTRY: dict[str, type[Source]] = {
-    cls.type: cls for cls in (RssSource, AlpacaNews, SecFilings, Reddit, CryptoPanic, XSearch, JsonlInbox)
+    cls.type: cls for cls in (RssSource, AlpacaNews, SecFilings, Reddit, CryptoPanic, XSearch, TwitterApiIo,
+                        JsonlInbox)
 }
 
 

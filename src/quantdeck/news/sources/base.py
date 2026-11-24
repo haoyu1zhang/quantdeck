@@ -86,7 +86,10 @@ def parse_time(s: str | None) -> datetime | None:
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
-            return None
+            try:
+                dt = datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y")  # X style: Tue Dec 10 07:00:30 +0000 2024
+            except ValueError:
+                return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)

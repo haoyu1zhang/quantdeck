@@ -12,7 +12,8 @@ from quantdeck.news.llm import LLMScorer, _extract_json
 from quantdeck.news.models import MARKET_CRYPTO, NewsItem, utcnow
 from quantdeck.news.sources import Source, item_from_dict
 from quantdeck.news.sources.rss import parse_feed
-from quantdeck.news.sources.x import XSearch, _chunks
+from quantdeck.news.sources.base import parse_time
+from quantdeck.news.sources.x import TwitterApiIo, XSearch, _chunks
 from quantdeck.news.symbols import Watchlist, canonical, market_scope
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
@@ -344,3 +345,43 @@ def test_reader_and_entry_gate(tmp_path):
     st2 = NewsStore(tmp_path / "old.db")
     st2.add_verdicts([old])
     assert NewsReader(tmp_path / "old.db", "crypto", max_age_minutes=60).verdict("BTC") is None
+
+
+def test_twitterapi_io_source(monkeypatch):
+    import quantdeck.news.sources.x as xmod
+
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "k")
+    w = Watchlist(stock=["NVDA"], crypto=["BTC"])
+    src = TwitterApiIo(SourceConfig(name="x", type="twitterapi_io", options={
+        "min_followers": 100, "daily_limit": 3, "cashtags": True}), w)
+    calls = []
+
+    def fake(url, params=None, headers=None, **kw):
+        calls.append(params)
+        assert headers == {"X-API-Key": "k"}
+        return {"tweets": [
+            {"id": "105", "text": "$NVDA guidance raised", "createdAt": "Tue Nov 24 15:00:00 +0000 2026",
+             "likeCount": 50, "retweetCount": 5, "quoteCount": 1, "replyCount": 2, "lang": "en",
+             "author": {"userName": "big", "followers": 250000, "isBlueVerified": True}},
+            {"id": "104", "text": "rt", "isRetweet": True, "author": {"userName": "a", "followers": 9999}},
+            {"id": "103", "text": "$BTC moon", "createdAt": "Tue Nov 24 14:00:00 +0000 2026",
+             "author": {"userName": "tiny", "followers": 10}},
+        ], "has_next_page": True, "next_cursor": "c2"}
+
+    monkeypatch.setattr(xmod, "get_json", fake)
+    state = {}
+    items = src.fetch(state)
+    assert [i.native_id for i in items] == ["105"]            # retweet and small account dropped
+    it = items[0]
+    assert it.author == "@big" and it.engagement["reposts"] == 6 and it.published_at.hour == 15
+    assert it.url == "https://x.com/big/status/105" and 0.3 < it.credibility <= 0.75
+    assert len(calls) == 1 and state["read_today"] == 3      # budget used up after one page
+    assert state["since_id"][calls[0]["query"]] == "105"
+    assert src.fetch(state) == [] and len(calls) == 1       # nothing left today
+
+
+def test_parse_time_formats():
+    assert parse_time("Tue Dec 10 07:00:30 +0000 2024").isoformat() == "2024-12-10T07:00:30+00:00"
+    assert parse_time("2026-11-20T21:05:00-05:00").hour == 2
+    assert parse_time("Mon, 23 Nov 2026 14:30:00 GMT").hour == 14
+    assert parse_time("garbage") is None
