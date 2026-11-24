@@ -11,3 +11,4 @@ runs/
 *.parquet
 .DS_Store
 /data/
+/configs/
