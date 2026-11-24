@@ -35,3 +35,5 @@ quantdeck = ["web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: talks to real paper/testnet venues; needs credentials"]

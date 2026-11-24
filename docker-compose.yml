@@ -1,0 +1,27 @@
+# docker compose up -d
+# Put API keys and QUANTDECK_TOKEN in .env next to this file.
+x-common: &common
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - ./runs:/app/runs
+    - ./data:/data
+    - ./configs:/app/configs:ro
+
+services:
+  dashboard:
+    <<: *common
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"   # put a reverse proxy with TLS in front before exposing it
+
+  bot:
+    <<: *common
+    # one service per strategy; copy this block for more
+    command: ["run", "configs/bot.yaml"]
+    stop_grace_period: 30s      # time to cancel working orders on shutdown
+
+  watchdog:
+    <<: *common
+    command: ["watchdog", "--stale", "600"]

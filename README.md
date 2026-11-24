@@ -14,13 +14,15 @@ paper and live runs are doing.
 
 ## Features
 
-- Event-driven backtester: orders fill on the next bar, so a strategy can't trade on the bar it used to decide
-- Fees, slippage, whole-share vs fractional sizing, limit and stop orders
+- Event-driven backtester: orders fill on the next bar, so a strategy can't trade on the bar it used to decide. Roughly 45k bars a second on one core with a simple strategy
+- Fees, slippage, volume caps, whole-share vs fractional sizing, limit and stop orders
 - Metrics: CAGR, Sharpe, Sortino, max drawdown, win rate, profit factor, exposure, plus an equal-weight buy & hold comparison
+- Grid search across processes, and walk-forward testing to see how parameters hold up on data they weren't picked on
 - Paper trading three ways: Alpaca paper account, exchange testnet or demo, or fully local (live prices, simulated fills, no account needed)
 - Live trading with a pre-trade risk layer: order size, position size, gross exposure and daily loss limits, plus a kill switch
-- Parquet cache for historical data, so repeat backtests work offline
-- Web dashboard and JSON API
+- Stop-loss / take-profit orders that rest at the broker, so positions stay protected if the bot goes down
+- Telegram, webhook (Slack, Discord, WeCom, Feishu, DingTalk) and email alerts, plus a watchdog for runs that stop responding
+- Runs recorded in SQLite; dashboard with token login; Docker setup
 
 ## Install
 
@@ -82,19 +84,83 @@ What the runner does:
 4. Writes `status.json`, `equity.csv`, `journal.jsonl` (every order and fill) and `run.log` to `runs/<name>/`.
 
 To stop a run, press Ctrl+C, click Stop in the dashboard, or create
-`runs/<name>/STOP`. Open orders are canceled on the way out.
+`runs/<name>/STOP`. Working entry orders are canceled on the way out;
+protective stops stay at the broker.
 
 US stock runs only act during the regular session. The runner asks Alpaca's
 clock, which knows about holidays and half days.
+
+### Protective exits
+
+```yaml
+risk:
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.15
+  trailing_stop: true
+```
+
+As soon as a position is open, a stop order goes to the broker for the full
+size, so it executes even if quantdeck has crashed or the server is offline.
+It's kept in sync as the position changes, moved up when `trailing_stop` is
+on, and canceled when the strategy exits on its own.
+
+How the take-profit is placed depends on the venue:
+
+| | stop | take-profit |
+|---|---|---|
+| Alpaca stocks, whole shares | stop | same order (OCO) |
+| Alpaca stocks, fractional | stop (DAY, re-placed each session) | watched by quantdeck |
+| Alpaca crypto | stop-limit, 1% below the stop | watched by quantdeck |
+| CCXT spot | stop (`triggerPrice`) | watched by quantdeck |
+| backtest / local paper | stop | same order (OCO) |
+
+### Notifications
+
+Set any of these in `.env` and they're used automatically:
+
+```
+TELEGRAM_BOT_TOKEN=...   TELEGRAM_CHAT_ID=...
+NOTIFY_WEBHOOK_URL=...   NOTIFY_WEBHOOK_KIND=wecom   # slack, discord, feishu, dingtalk
+SMTP_HOST=...            NOTIFY_EMAIL_TO=...
+```
+
+`quantdeck notify-test` sends a test message. Runs report start, stop, fills,
+stop-loss hits, halts and errors; repeated errors are rate-limited. Pick events
+per run with `notify.events`, or set `notify.telegram: true` to refuse to
+start without it.
+
+A crashed process can't send its own alert, so run the watchdog next to your
+bots:
+
+```bash
+quantdeck watchdog --stale 600   # alert when a run's heartbeat is 10 minutes old
+```
 
 ### Safety rails
 
 - `mode: live` won't start without `--confirm-live`
 - `mode: live` with a CCXT broker refuses to start if `sandbox` or `demo` is still on
-- Risk checks run before every order. Orders that reduce a position always go through, even after a halt
-- `max_daily_loss_pct` halts new entries for the rest of the day
+- Risk checks run before every order, counting orders that are still open. Orders that reduce a position always go through, even after a halt
+- `max_daily_loss_pct` halts new entries for the rest of the day (New York trading day for stocks, UTC day for crypto)
 - Ten loop errors in a row halt new entries
 - A pid lock stops the same run from being started twice
+
+## Finding parameters without fooling yourself
+
+```bash
+# every combination, ranked (in-sample only)
+quantdeck optimize examples/btc_sma_backtest.yaml --grid fast=10:50:10 --grid slow=50,100,150,200
+
+# walk-forward: choose on one window, score on the next, four times over
+quantdeck optimize examples/btc_sma_backtest.yaml --grid fast=10:50:10 --grid slow=50,100,150,200 \
+    --walk-forward 4 --train-frac 0.7
+```
+
+The walk-forward report shows the parameters each window picked, how they did
+on the following unseen window, and the stitched out-of-sample equity curve.
+Walk-forward efficiency (out-of-sample Sharpe over in-sample Sharpe) is the
+number to look at: well below 0.5 usually means the grid search was fitting
+noise. Results go to `runs/<name>/optimize/`.
 
 ## Config reference
 
@@ -127,6 +193,7 @@ fees:
   per_share: 0.0
   minimum: 0.0
   slippage: 0.0005
+  max_volume_pct: 0.05    # backtest: fill at most 5% of a bar's volume, rest carries over
 
 risk:
   max_order_value: 1000
@@ -135,6 +202,15 @@ risk:
   max_daily_loss_pct: 0.03
   max_orders_per_day: 20
   allow_short: false
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.15
+  trailing_stop: false
+
+notify:
+  telegram: null          # null: use if configured, true: required, false: off
+  webhook: null           # or the format: slack | discord | wecom | feishu | dingtalk
+  email: null
+  events: [start, stop, fill, stop_hit, halt, error]
 
 strategy:
   name: sma_cross
@@ -172,8 +248,9 @@ What `ctx` gives you:
 | `price(sym)`, `bars(sym)` | last close, bars seen so far |
 | `position(sym)`, `positions()`, `equity`, `cash` | portfolio state |
 | `buy / sell(sym, qty, limit=, stop=)` | raw orders |
-| `order_target_qty / order_target_percent(sym, x)` | trade toward a target, counting orders that are still open |
+| `order_target_qty / order_target_percent(sym, x)` | trade toward a target, counting orders that are still open and the cash pending sells will free up |
 | `close_position(sym)`, `cancel_all(sym=None)` | |
+| `vol_target_weight(sym, target_vol)` | weight that gives a symbol roughly that annualised volatility |
 | `state` | a dict for anything the strategy wants to keep |
 
 Built-in strategies: `sma_cross`, `rsi_reversion`, `donchian`. They are
@@ -197,22 +274,49 @@ which is what makes the same code run in every mode.
 - **Rate limits.** Every venue client is wrapped in a thread-safe token bucket (Alpaca: 3 req/s; CCXT: the exchange's own limit). Threads sharing a client share the budget.
 - **Order placement.** Strategy callbacks and orders stay on one thread, in timestamp order, so a fill can't arrive halfway through a decision. Each order carries a unique client order id. On a timeout the broker looks the order up by that id before retrying, so a lost response doesn't turn into a second order.
 - **Multiple processes.** Each run takes a pid lock, so the same config can't be started twice. Give each concurrently running strategy its own account or sub-account. Risk limits are per process and don't see each other's positions.
-- **Dashboard.** Backtests run in a process pool behind a job queue. The API stays responsive, identical requests share one job and its cached result, and the queue is capped (HTTP 429 when full). Status files are written atomically, so the dashboard never reads half a file.
+- **Dashboard.** Backtests run in a process pool behind a job queue. The API stays responsive, identical requests share one job and its cached result, and the queue is capped (HTTP 429 when full). Status files are written atomically, and the trade database runs in WAL mode, so the dashboard reads while the runner writes without either waiting.
+- **Notifications** go out from a background thread with a bounded queue. A slow chat API never delays an order.
+- **Optimisation** spreads combinations over a process pool. The data is handed to each worker once, not with every task.
+
+## Deploying
+
+```bash
+cp .env.example .env            # keys, QUANTDECK_TOKEN, notification settings
+mkdir configs && cp examples/btc_paper_testnet.yaml configs/bot.yaml
+docker compose up -d            # dashboard, one bot, watchdog
+```
+
+The dashboard is bound to 127.0.0.1 on the host. To reach it from elsewhere,
+put a reverse proxy with TLS in front of it. `quantdeck serve` won't listen on
+a public address unless `QUANTDECK_TOKEN` is set. Each bot is its own service,
+restarted automatically and stopped with time to cancel working orders.
+
+Each run writes to `runs/<name>/`:
+
+| file | |
+|---|---|
+| `status.json` | current state, read by the dashboard and the watchdog |
+| `trades.db` | SQLite: orders, fills, equity curve |
+| `journal.jsonl` | append-only log of every order and fill |
+| `run.log` | the process log |
+| `sim_state.json` / `broker_state.json` | what's needed to resume after a restart |
 
 ## Project layout
 
 ```
 src/quantdeck/
-  backtest/      engine and metrics
+  backtest/      engine, metrics, grid search and walk-forward
   brokers/       sim, alpaca, ccxt
   data/          sources (ccxt, alpaca, csv) and parquet cache
-  live/          runner, market clock, run lock
+  live/          runner, market clock, run lock, watchdog
   strategies/    base class and built-ins
   api/           FastAPI app and backtest job queue
   web/           dashboard (plain HTML/JS, no build step)
   context.py     what strategies see
   risk.py        pre-trade checks
   ratelimit.py   token bucket, throttled clients, retry
+  notify.py      Telegram / webhook / email alerts
+  storage.py     SQLite trade store
 examples/        configs and a custom strategy
 tests/
 ```
@@ -220,17 +324,24 @@ tests/
 ## Tests
 
 ```bash
-pytest -q
+pytest -q                  # offline; broker adapters run against fake clients
+pytest -m integration -rs  # real round trips on Binance testnet and Alpaca paper
 ```
 
-No network needed. Broker adapters are tested against fake clients.
+The integration tests place limit orders far from the market and cancel them.
+They need `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_SECRET` and Alpaca paper
+keys, and skip whatever isn't configured. In CI they run when the same names
+are added as repository secrets (Alpaca as `ALPACA_PAPER_API_KEY` /
+`ALPACA_PAPER_SECRET_KEY`). GitHub's runners are in the US, so testnets that
+block US traffic will fail there.
 
 ## Known limitations
 
 - Spot only on CCXT, no futures or margin yet
-- Backtests use bar data, so intrabar order of high and low is unknown. A bar that touches both a limit and a stop fills both
+- Market data is polled, not streamed. Fine for 5-minute bars and up; too slow for anything that needs to react within seconds
+- Backtests use bar data, so the order of high and low inside a bar is unknown. When a bar reaches both a stop and its take-profit, the stop is assumed to fill
 - Stock data defaults to Alpaca's free IEX feed, which covers a slice of total volume
-- Average entry price for spot crypto is tracked locally and resets to market price after a restart
+- Risk limits are per process. Strategies sharing one account don't see each other's positions
 
 ## Disclaimer
 

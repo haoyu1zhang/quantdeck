@@ -22,3 +22,4 @@ risk:
   max_position_pct: 0.5
   max_daily_loss_pct: 0.03
   max_orders_per_day: 20
+  stop_loss_pct: 0.05

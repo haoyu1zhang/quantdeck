@@ -24,3 +24,8 @@ risk:
   max_gross_exposure: 0.3
   max_daily_loss_pct: 0.02
   max_orders_per_day: 6
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.15      # whole shares: sent together with the stop as one OCO order
+
+notify:
+  telegram: true             # refuse to start if Telegram isn't configured

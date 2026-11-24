@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -18,3 +19,21 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[all,dev]"
       - run: pytest -q
+
+  integration:
+    # runs only when someone has added testnet credentials to the repo secrets
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+    env:
+      BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+      BINANCE_TESTNET_SECRET: ${{ secrets.BINANCE_TESTNET_SECRET }}
+      ALPACA_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_PAPER_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[all,dev]"
+      - run: pytest -q -m integration -rs

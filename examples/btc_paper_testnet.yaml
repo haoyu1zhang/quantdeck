@@ -26,3 +26,8 @@ risk:
   max_order_value: 2000
   max_position_pct: 0.5
   max_daily_loss_pct: 0.05
+  stop_loss_pct: 0.04        # stop order rests on the exchange from the moment we're in
+  trailing_stop: true
+
+notify:
+  events: [start, stop, fill, stop_hit, halt, error]
